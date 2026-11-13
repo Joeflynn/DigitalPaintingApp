@@ -1,7 +1,13 @@
-import { getBrush, MAX_BRUSH_SIZE, MIN_BRUSH_SIZE } from "./brushes"
+import { GPUBrush, GPUSizeError } from "./gpu-brush"
+import {
+  type BrushPreset,
+  getBrush,
+  MAX_BRUSH_SIZE,
+  MIN_BRUSH_SIZE,
+} from "./brushes"
 import { hexToHsv, hexToRgb, hsvToHex, rgbToHsv, type HSV } from "./color"
 import { loadAutosave, saveAutosave, type SavedDoc } from "./storage"
-import { SmudgeStroke, Stroke } from "./stroke"
+import { Stroke } from "./stroke"
 import {
   clamp,
   cloneCanvas,
@@ -69,6 +75,7 @@ export function isPaintTool(t: ToolId): t is PaintTool {
 }
 
 export interface ToolSettings {
+  dynamics?: Partial<BrushPreset>
   brushId: string
   size: number
   opacity: number
@@ -114,16 +121,6 @@ type Action =
       pointerId: number
       stroke: Stroke
       layerId: string
-      erase: boolean
-      opacity: number
-      alphaLock: boolean
-    }
-  | {
-      kind: "smudge"
-      pointerId: number
-      smudge: SmudgeStroke
-      layerId: string
-      before: StructSnap
     }
   | { kind: "pan"; pointerId: number; lx: number; ly: number }
   | { kind: "rotate"; pointerId: number; last: number }
@@ -156,7 +153,11 @@ const MAX_ZOOM = 48
 let revCounter = 1
 const nextRev = () => ++revCounter
 
-function defaultSettings(brushId: string, size?: number, opacity?: number): ToolSettings {
+function defaultSettings(
+  brushId: string,
+  size?: number,
+  opacity?: number
+): ToolSettings {
   const b = getBrush(brushId)
   return {
     brushId,
@@ -195,8 +196,10 @@ export class PaintEngine {
 
   private listeners = new Set<() => void>()
   private canvases = new Map<string, HTMLCanvasElement>()
-  private buffer = makeCanvas(1, 1)
-  private scratchA = makeCanvas(1, 1)
+  private gpu: GPUBrush | null = null
+  /** A finished stroke whose wet paint is still flowing before it is committed. */
+  private settling: { stroke: Stroke; layerId: string; frames: number } | null =
+    null
   private scratchB = makeCanvas(1, 1)
   private checker: CanvasPattern | null = null
 
@@ -250,6 +253,16 @@ export class PaintEngine {
   // ---- document ------------------------------------------------------------
 
   async init() {
+    try {
+      this.gpu = await GPUBrush.create(() => {
+        this.settling = null
+        this.action = null
+        this.gpu = null
+        this.notify("Graphics device lost. Reload to resume painting.")
+      })
+    } catch {
+      this.notify("Painting requires a browser with WebGPU enabled.")
+    }
     const saved: SavedDoc | null = await loadAutosave().catch(() => null)
     if (saved && saved.layers.length > 0) {
       try {
@@ -296,8 +309,6 @@ export class PaintEngine {
   }
 
   private allocate(w: number, h: number) {
-    this.buffer = makeCanvas(w, h)
-    this.scratchA = makeCanvas(w, h)
     this.scratchB = makeCanvas(w, h)
   }
 
@@ -368,6 +379,7 @@ export class PaintEngine {
   }
 
   undo() {
+    this.finishSettle()
     if (this.action) return
     const e = this.undoStack.pop()
     if (!e) return
@@ -377,6 +389,7 @@ export class PaintEngine {
   }
 
   redo() {
+    this.finishSettle()
     if (this.action) return
     const e = this.redoStack.pop()
     if (!e) return
@@ -432,6 +445,7 @@ export class PaintEngine {
   // ---- layer operations ----------------------------------------------------
 
   setActiveLayer(id: string) {
+    this.finishSettle()
     if (this.action) return
     this.setState({ activeLayerId: id })
   }
@@ -558,7 +572,10 @@ export class PaintEngine {
   }
 
   /** Replaces a layer's pixels with a new canvas, undoably. */
-  private replaceCanvas(id: string, build: (src: HTMLCanvasElement) => HTMLCanvasElement) {
+  private replaceCanvas(
+    id: string,
+    build: (src: HTMLCanvasElement) => HTMLCanvasElement
+  ) {
     const src = this.canvases.get(id)
     if (!src) return
     this.structural(() => {
@@ -612,13 +629,19 @@ export class PaintEngine {
     next.size = clamp(next.size, MIN_BRUSH_SIZE, MAX_BRUSH_SIZE)
     next.opacity = clamp(next.opacity, 0.01, 1)
     next.streamline = clamp(next.streamline, 0, 1)
-    this.setState({ toolSettings: { ...this.state.toolSettings, [tool]: next } })
+    this.setState({
+      toolSettings: { ...this.state.toolSettings, [tool]: next },
+    })
     this.updateCursor()
   }
 
   selectBrush(tool: PaintTool, brushId: string) {
-    const keepOpacity = tool === "smudge" ? this.state.toolSettings.smudge.opacity : undefined
-    this.setToolSettings(tool, defaultSettings(brushId, undefined, keepOpacity))
+    const keepOpacity =
+      tool === "smudge" ? this.state.toolSettings.smudge.opacity : undefined
+    this.setToolSettings(tool, {
+      ...defaultSettings(brushId, undefined, keepOpacity),
+      dynamics: {},
+    })
   }
 
   nudgeSize(dir: 1 | -1) {
@@ -711,10 +734,14 @@ export class PaintEngine {
       return
     }
     this.needsFit = false
-    const availW = Math.max(100, this.vw - this.insets.left - this.insets.right - 48)
+    const availW = Math.max(
+      100,
+      this.vw - this.insets.left - this.insets.right - 48
+    )
     const availH = Math.max(100, this.vh - 48)
     const scale = Math.min(availW / docW, availH / docH)
-    const cx = this.insets.left + (this.vw - this.insets.left - this.insets.right) / 2
+    const cx =
+      this.insets.left + (this.vw - this.insets.left - this.insets.right) / 2
     const cy = this.vh / 2
     this.view = {
       scale,
@@ -761,7 +788,8 @@ export class PaintEngine {
   }
 
   zoomBy(factor: number) {
-    const cx = this.insets.left + (this.vw - this.insets.left - this.insets.right) / 2
+    const cx =
+      this.insets.left + (this.vw - this.insets.left - this.insets.right) / 2
     this.zoomAt(cx, this.vh / 2, factor)
   }
 
@@ -807,27 +835,17 @@ export class PaintEngine {
   private drawLayers(ctx: CanvasRenderingContext2D) {
     const { layers } = this.state
     const a = this.action
+    const live = this.liveStroke()
     for (let i = 0; i < layers.length; i++) {
       const m = layers[i]
       if (!m.visible) continue
-      let src = this.canvases.get(m.id)
+      let src: HTMLCanvasElement | undefined = this.canvases.get(m.id)
       if (!src) continue
       let ox = 0
       let oy = 0
-      if (a?.kind === "stroke" && a.layerId === m.id && a.stroke.dirty) {
-        const r = a.stroke.dirty
-        const A = ctxOf(this.scratchA)
-        A.globalAlpha = 1
-        A.globalCompositeOperation = "copy"
-        A.drawImage(src, 0, 0)
-        A.globalCompositeOperation = a.erase
-          ? "destination-out"
-          : a.alphaLock
-            ? "source-atop"
-            : "source-over"
-        A.globalAlpha = a.opacity
-        A.drawImage(this.buffer, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h)
-        src = this.scratchA
+      if (live && this.gpu && live.layerId === m.id && live.stroke.dirty) {
+        // The GPU canvas shows this whole layer with the stroke applied.
+        src = this.gpu.canvas
       } else if (a?.kind === "move" && a.layerId === m.id) {
         ox = a.dx
         oy = a.dy
@@ -867,9 +885,21 @@ export class PaintEngine {
     return this.checker
   }
 
+  /** The stroke currently owned by the GPU renderer, if any. */
+  private liveStroke() {
+    const a = this.action
+    return a?.kind === "stroke" ? a : this.settling
+  }
+
   private render() {
     const canvas = this.display
     if (!canvas || !this.state.ready) return
+    const gpu = this.gpu
+    if (gpu && this.liveStroke()) {
+      gpu.frame()
+      // Wet paint keeps moving on its own, so keep the frames coming.
+      if (gpu.wet) this.requestRender()
+    }
     const ctx = ctxOf(canvas)
     const { docW, docH, background, showBackground, symmetry } = this.state
     const { tx, ty, scale, rot } = this.view
@@ -915,6 +945,8 @@ export class PaintEngine {
       ctx.stroke()
       ctx.setLineDash([])
     }
+
+    if (this.settling && --this.settling.frames <= 0) this.finishSettle()
   }
 
   private updateCursor() {
@@ -933,12 +965,18 @@ export class PaintEngine {
             : "crosshair"
     if (!el) return
     const show =
-      isPaintTool(tool) && this.pointerInside && !this.spaceDown && a?.kind !== "pan"
+      isPaintTool(tool) &&
+      this.pointerInside &&
+      !this.spaceDown &&
+      a?.kind !== "pan"
     if (!show) {
       el.style.opacity = "0"
       return
     }
-    const size = Math.max(4, this.state.toolSettings[tool].size * this.view.scale)
+    const size = Math.max(
+      4,
+      this.state.toolSettings[tool].size * this.view.scale
+    )
     el.style.opacity = "1"
     el.style.width = `${size}px`
     el.style.height = `${size}px`
@@ -979,6 +1017,7 @@ export class PaintEngine {
   private onDown = (e: PointerEvent) => {
     const canvas = this.display
     if (!canvas || !this.state.ready) return
+    this.finishSettle()
     e.preventDefault()
     try {
       canvas.setPointerCapture(e.pointerId)
@@ -993,7 +1032,10 @@ export class PaintEngine {
       this.touches.set(e.pointerId, { x: sx, y: sy })
       if (this.touches.size >= 2) {
         if (this.gesture) {
-          this.gesture.maxTouches = Math.max(this.gesture.maxTouches, this.touches.size)
+          this.gesture.maxTouches = Math.max(
+            this.gesture.maxTouches,
+            this.touches.size
+          )
         } else {
           this.cancelAction()
           this.startGesture()
@@ -1028,7 +1070,15 @@ export class PaintEngine {
         return
       }
       if (tool === "move") {
-        this.action = { kind: "move", pointerId: id, layerId: layer.id, x0: x, y0: y, dx: 0, dy: 0 }
+        this.action = {
+          kind: "move",
+          pointerId: id,
+          layerId: layer.id,
+          x0: x,
+          y0: y,
+          dx: 0,
+          dy: 0,
+        }
       } else {
         this.simPressure = 0.75
         this.beginPaint(tool, layer, id, x, y, this.pressure(e))
@@ -1046,38 +1096,57 @@ export class PaintEngine {
     p: number
   ) {
     const settings = this.state.toolSettings[tool]
-    const brush = getBrush(settings.brushId)
+    let brush: BrushPreset = {
+      ...getBrush(settings.brushId),
+      ...settings.dynamics,
+    }
     if (tool === "smudge") {
-      const before = this.snap()
-      const working = cloneCanvas(this.canvases.get(layer.id)!)
-      this.canvases.set(layer.id, working)
-      const smudge = new SmudgeStroke(working, brush, settings.size, settings.opacity)
-      smudge.start(x, y)
-      this.action = { kind: "smudge", pointerId, smudge, layerId: layer.id, before }
+      // Smudging moves paint that is already there, so the tip only needs a
+      // steady contact; the tool's opacity acts as its strength.
+      brush = {
+        ...brush,
+        flow: Math.max(brush.flow, 0.35),
+        flowPressure: 0,
+        spacing: Math.min(brush.spacing, 0.06),
+      }
+    }
+    const gpu = this.gpu
+    if (!gpu) {
+      this.notify("Painting requires WebGPU. Enable it and reload.")
       return
     }
-    const erase = tool === "eraser"
-    if (!erase) this.rememberColor()
-    const bctx = ctxOf(this.buffer)
-    bctx.setTransform(1, 0, 0, 1, 0, 0)
-    bctx.globalAlpha = 1
-    bctx.globalCompositeOperation = "source-over"
-    const stroke = new Stroke(bctx, brush, {
-      color: erase ? "#000000" : hsvToHex(this.state.color),
+    if (tool === "brush") this.rememberColor()
+    const rgb = hexToRgb(hsvToHex(this.state.color)) ?? [0, 0, 0]
+    try {
+      gpu.begin({
+        width: this.state.docW,
+        height: this.state.docH,
+        source: this.canvases.get(layer.id),
+        brush,
+        color: [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255],
+        size: settings.size,
+        opacity: settings.opacity,
+        seed: Math.random() * 1000,
+        mode:
+          tool === "eraser" ? "erase" : tool === "smudge" ? "smudge" : "paint",
+        alphaLock: layer.alphaLock,
+      })
+    } catch (error) {
+      console.error("Brush stroke initialization failed", error)
+      this.notify(
+        error instanceof GPUSizeError
+          ? error.message
+          : "The brush could not start. Your artwork is unchanged; details are in the browser console."
+      )
+      return
+    }
+    const stroke = new Stroke((...dab) => gpu.dab(...dab), brush, {
       size: settings.size,
       streamline: settings.streamline,
       mirrorX: this.state.symmetry ? this.state.docW / 2 : null,
     })
     stroke.add(x, y, p)
-    this.action = {
-      kind: "stroke",
-      pointerId,
-      stroke,
-      layerId: layer.id,
-      erase,
-      opacity: settings.opacity,
-      alphaLock: layer.alphaLock,
-    }
+    this.action = { kind: "stroke", pointerId, stroke, layerId: layer.id }
     this.requestRender()
   }
 
@@ -1086,7 +1155,8 @@ export class PaintEngine {
     const [sx, sy] = this.local(e)
 
     if (e.pointerType === "touch") {
-      if (this.touches.has(e.pointerId)) this.touches.set(e.pointerId, { x: sx, y: sy })
+      if (this.touches.has(e.pointerId))
+        this.touches.set(e.pointerId, { x: sx, y: sy })
       if (this.gesture) {
         this.updateGesture()
         return
@@ -1131,19 +1201,19 @@ export class PaintEngine {
         this.requestRender()
         break
       }
-      case "stroke":
-      case "smudge": {
+      case "stroke": {
         // Mice and fingers have no pressure, so derive some from speed.
         const target = clamp(1.15 - moved / 42, 0.3, 1)
         this.simPressure += (target - this.simPressure) * 0.22
         const events =
-          typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : []
+          typeof e.getCoalescedEvents === "function"
+            ? e.getCoalescedEvents()
+            : []
         const list = events.length > 0 ? events : [e]
         for (const ev of list) {
           const [lx, ly] = this.local(ev)
           const [x, y] = this.screenToDoc(lx, ly)
-          if (a.kind === "stroke") a.stroke.add(x, y, this.pressure(ev))
-          else a.smudge.move(x, y)
+          a.stroke.add(x, y, this.pressure(ev))
         }
         this.requestRender()
         break
@@ -1164,12 +1234,16 @@ export class PaintEngine {
     if (!a || a.pointerId !== e.pointerId) return
     this.action = null
     switch (a.kind) {
-      case "stroke":
-        this.commitStroke(a)
+      case "stroke": {
+        a.stroke.end()
+        const frames = this.gpu?.settleFrames ?? 0
+        if (frames > 0 && a.stroke.dirty) {
+          this.settling = { stroke: a.stroke, layerId: a.layerId, frames }
+        } else {
+          this.commitStroke(a.stroke, a.layerId)
+        }
         break
-      case "smudge":
-        this.commitSmudge(a)
-        break
+      }
       case "move":
         if (a.dx !== 0 || a.dy !== 0) {
           const { dx, dy } = a
@@ -1193,16 +1267,23 @@ export class PaintEngine {
     if (this.action?.pointerId === e.pointerId) this.cancelAction()
   }
 
-  /** Abandons the in-flight action without committing it. */
+  /** Commits a stroke that is still settling, cutting its drying time short. */
+  private finishSettle() {
+    const s = this.settling
+    if (!s) return
+    this.settling = null
+    this.commitStroke(s.stroke, s.layerId)
+    this.requestRender()
+  }
+
+  /**
+   * Abandons the in-flight action without committing it. A stroke that has
+   * already been released and is only settling is committed, not lost.
+   */
   private cancelAction() {
-    const a = this.action
-    if (!a) return
+    this.finishSettle()
+    if (!this.action) return
     this.action = null
-    if (a.kind === "stroke") {
-      ctxOf(this.buffer).clearRect(0, 0, this.buffer.width, this.buffer.height)
-    } else if (a.kind === "smudge") {
-      this.restore(a.before)
-    }
     this.requestRender()
   }
 
@@ -1216,45 +1297,31 @@ export class PaintEngine {
     return w > 0 && h > 0 ? { x, y, w, h } : null
   }
 
-  private commitStroke(a: Extract<Action, { kind: "stroke" }>) {
-    a.stroke.end()
-    const full = a.stroke.dirty
-    const r = this.clampRect(full)
-    const canvas = this.canvases.get(a.layerId)
-    if (r && canvas) {
-      const ctx = ctxOf(canvas)
-      const before = cropCanvas(canvas, r)
-      ctx.save()
-      ctx.globalCompositeOperation = a.erase
-        ? "destination-out"
-        : a.alphaLock
-          ? "source-atop"
-          : "source-over"
-      ctx.globalAlpha = a.opacity
-      ctx.drawImage(this.buffer, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h)
-      ctx.restore()
-      const after = cropCanvas(canvas, r)
-      const id = a.layerId
-      this.bumpRev(id)
-      this.pushUndo({
-        undo: () => this.applyPatch(id, r, before),
-        redo: () => this.applyPatch(id, r, after),
-      })
-    }
-    ctxOf(this.buffer).clearRect(0, 0, this.buffer.width, this.buffer.height)
-  }
-
-  private commitSmudge(a: Extract<Action, { kind: "smudge" }>) {
-    if (!a.smudge.dirty) {
-      this.restore(a.before)
-      return
-    }
-    this.bumpRev(a.layerId)
-    const after = this.snap()
-    const before = a.before
+  /** Copies the stroke's footprint from the GPU canvas into the layer. */
+  private commitStroke(stroke: Stroke, layerId: string) {
+    const gpu = this.gpu
+    const canvas = this.canvases.get(layerId)
+    const d = stroke.dirty
+    if (!gpu || !canvas || !d) return
+    // Resolve in this task so the GPU canvas is readable by drawImage below.
+    gpu.frame(false)
+    const m = gpu.margin
+    const r = this.clampRect({
+      x: d.x - m,
+      y: d.y - m,
+      w: d.w + m * 2,
+      h: d.h + m * 2,
+    })
+    if (!r) return
+    const ctx = ctxOf(canvas)
+    const before = cropCanvas(canvas, r)
+    ctx.clearRect(r.x, r.y, r.w, r.h)
+    ctx.drawImage(gpu.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h)
+    const after = cropCanvas(canvas, r)
+    this.bumpRev(layerId)
     this.pushUndo({
-      undo: () => this.restore(before),
-      redo: () => this.restore(after),
+      undo: () => this.applyPatch(layerId, r, before),
+      redo: () => this.applyPatch(layerId, r, after),
     })
   }
 
@@ -1446,7 +1513,7 @@ export class PaintEngine {
   }
 
   private async save() {
-    if (this.action) {
+    if (this.action || this.settling) {
       this.scheduleSave()
       return
     }

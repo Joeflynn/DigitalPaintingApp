@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Brush lab</title>
+    <style>
+      body {
+        background: #181b20;
+        color: #eee;
+        font: 13px system-ui;
+        margin: 12px;
+      }
+      pre {
+        white-space: pre-wrap;
+        columns: 3;
+        font-size: 11px;
+      }
+      #samples {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      #samples figure {
+        margin: 0;
+        position: relative;
+      }
+      #samples figcaption {
+        position: absolute;
+        left: 8px;
+        top: 3px;
+        color: #222;
+        font-size: 12px;
+      }
+      canvas {
+        width: 100%;
+        display: block;
+        border-radius: 6px;
+        background: #f6f3ec;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="samples"></div>
+    <pre id="result">Running...</pre>
+    <script type="module" src="./brush-lab.ts"></script>
+  </body>
+</html>
