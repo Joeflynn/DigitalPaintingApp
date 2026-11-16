@@ -37,6 +37,8 @@ interface Placement {
   h: number
   /** Too close to the top bar for a menu to open above the panel. */
   tight?: boolean
+  /** Height to use in the panel's other mode (colour: compact vs expanded). */
+  alt?: number
 }
 
 export interface LayoutState {
@@ -44,6 +46,8 @@ export interface LayoutState {
   /** Stacking order, back to front. */
   order: PanelId[]
   hidden: Partial<Record<ViewItem, boolean>>
+  /** The colour panel shows its full tabbed view rather than just the wheel. */
+  colorExpanded?: boolean
   /** Snap lines shown while a panel is being moved; never saved. */
   guides: { x?: number; y?: number } | null
 }
@@ -78,7 +82,13 @@ function load(): LayoutState {
         return p && [p.x, p.t, p.b, p.w, p.h].every(Number.isFinite) && raw.order?.includes(id)
       })
     if (ok) {
-      return { panels: raw.panels!, order: raw.order!, hidden: raw.hidden ?? {}, guides: null }
+      return {
+        panels: raw.panels!,
+        order: raw.order!,
+        hidden: raw.hidden ?? {},
+        colorExpanded: !!raw.colorExpanded,
+        guides: null,
+      }
     }
   } catch {
     // fall through to the default layout
@@ -93,8 +103,8 @@ function commit(next: LayoutState, save = true) {
   state = next
   if (save) {
     try {
-      const { panels, order, hidden } = next
-      localStorage.setItem(KEY, JSON.stringify({ panels, order, hidden }))
+      const { panels, order, hidden, colorExpanded } = next
+      localStorage.setItem(KEY, JSON.stringify({ panels, order, hidden, colorExpanded }))
     } catch {
       // storage unavailable: the layout just won't persist
     }
@@ -113,6 +123,20 @@ export const layout = {
   reset: () => commit(defaults()),
   toggle(id: ViewItem) {
     commit({ ...state, hidden: { ...state.hidden, [id]: !state.hidden[id] } })
+  },
+  /** Switches the colour panel between its compact and expanded views. */
+  toggleColor() {
+    const p = state.panels.color
+    const colorExpanded = !state.colorExpanded
+    // Each view remembers its own height; the expanded one opens over
+    // whatever sits below, so it comes to the front.
+    const h = p.alt ?? (colorExpanded ? 600 : 300)
+    commit({
+      ...state,
+      colorExpanded,
+      panels: { ...state.panels, color: { ...p, h, alt: p.h } },
+      order: [...state.order.filter((o) => o !== "color"), "color"],
+    })
   },
   raise(id: PanelId) {
     if (state.order[state.order.length - 1] === id) return
@@ -272,7 +296,7 @@ export function PanelFrame({
           ...state,
           panels: {
             ...state.panels,
-            [id]: { ax: "l", x: rect.x, ay: "t", t: rect.y, b: 0, w: rect.w, h: rect.h, tight: p.tight },
+            [id]: { ax: "l", x: rect.x, ay: "t", t: rect.y, b: 0, w: rect.w, h: rect.h, tight: p.tight, alt: p.alt },
           },
           guides: { x: sx?.at, y: sy?.at },
         },
@@ -310,6 +334,7 @@ export function PanelFrame({
             w,
             h,
             tight: y - TOP < 320,
+            alt: p.alt,
           },
         },
         guides: null,
@@ -337,6 +362,7 @@ export function PanelFrame({
         ...placementStyle(p, resizable),
         minWidth: resizable ? minW : undefined,
         minHeight: resizable ? minH : undefined,
+        maxHeight: resizable ? `calc(100% - ${TOP + MARGIN}px)` : undefined,
         zIndex: 20 + order.indexOf(id),
       }}
     >

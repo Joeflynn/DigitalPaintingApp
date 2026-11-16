@@ -75,7 +75,7 @@ export function App() {
             </PanelFrame>
           )}
           {!hidden.color && (
-            <PanelFrame id="color" label="Colour" minW={200} minH={230}>
+            <PanelFrame id="color" label="Colour" minW={220} minH={lay.colorExpanded ? 380 : 220}>
               <ColorPanel />
             </PanelFrame>
           )}
