@@ -696,21 +696,41 @@ export class PaintEngine {
 
   /** Adds an adjustment layer running the given effect above the active layer. */
   addAdjustment(type: string) {
-    const def = getEffect(type)
-    if (!def) return
+    this.addAdjustments([{ type }])
+  }
+
+  /**
+   * Stacks one adjustment layer per item (first at the bottom) above the
+   * active layer, as a single undo step. Used for multi-effect looks.
+   */
+  addAdjustments(
+    items: { type: string; params?: Record<string, number>; opacity?: number }[]
+  ) {
     if (!this.fx) {
       this.notify("Effects require a browser with WebGPU enabled.")
       return
     }
+    const made: LayerMeta[] = []
+    for (const item of items) {
+      const def = getEffect(item.type)
+      if (!def) continue
+      const fx = defaultFx(def)
+      Object.assign(fx.params, item.params)
+      made.push({
+        ...this.makeLayer(def.label),
+        fx,
+        opacity: item.opacity ?? 1,
+      })
+      this.layerCounter -= 1
+    }
+    if (!made.length) return
     this.structural(() => {
       const { layers, activeLayerId } = this.state
-      this.layerCounter -= 1
-      const layer: LayerMeta = { ...this.makeLayer(def.label), fx: defaultFx(def) }
-      this.canvases.set(layer.id, makeCanvas(1, 1))
+      for (const layer of made) this.canvases.set(layer.id, makeCanvas(1, 1))
       const idx = layers.findIndex((l) => l.id === activeLayerId)
       const next = layers.slice()
-      next.splice(idx + 1, 0, layer)
-      this.setState({ layers: next, activeLayerId: layer.id })
+      next.splice(idx + 1, 0, ...made)
+      this.setState({ layers: next, activeLayerId: made[made.length - 1].id })
     })
   }
 

@@ -7,6 +7,7 @@ import {
   CheckIcon,
   CircleHalfIcon,
   SelectionIcon,
+  ShuffleIcon,
   SwapIcon,
   CopyIcon,
   EyeIcon,
@@ -28,6 +29,9 @@ import {
   EFFECTS,
   formatParam,
   getEffect,
+  LOOKS,
+  presetParams,
+  randomParams,
   type EffectDef,
 } from "@/paint/effects"
 import { BLEND_MODES, engine, type BlendMode, type LayerMeta } from "@/paint/engine"
@@ -176,8 +180,32 @@ function FxThumb() {
 /** Sliders for an adjustment layer's effect. */
 function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
   const fx = layer.fx!
+  const matches = (params: Record<string, number>) =>
+    def.params.every((p) => Math.abs((fx.params[p.key] ?? p.value) - params[p.key]) < 1e-6)
   return (
     <div className="flex flex-col gap-2 px-2 pt-0.5 pb-2">
+      {def.presets && (
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Presets">
+          {def.presets.map((preset) => {
+            const params = presetParams(def, preset)
+            const on = matches(params)
+            return (
+              <button
+                key={preset.name}
+                type="button"
+                aria-pressed={on}
+                onClick={() => engine.setFxParams(layer.id, params)}
+                className={cn(
+                  "rounded-full border border-white/10 bg-black/25 px-2 py-0.5 text-[10px] text-foreground outline-none hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-ring",
+                  on && "border-white/60 bg-white/15"
+                )}
+              >
+                {preset.name}
+              </button>
+            )
+          })}
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <span className="w-16 truncate text-[10px] text-muted-foreground uppercase">Strength</span>
         <Slider
@@ -216,6 +244,15 @@ function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
         <span className="mr-auto text-[10px] text-muted-foreground">
           {layer.clip ? "Affects the layer below" : "Affects all layers below"}
         </span>
+        {def.params.length > 0 && (
+          <IconButton
+            label="Randomize settings"
+            className="size-7"
+            onClick={() => engine.setFxParams(layer.id, randomParams(def))}
+          >
+            <ShuffleIcon />
+          </IconButton>
+        )}
         <IconButton
           label="Reset to defaults"
           className="size-7"
@@ -237,9 +274,33 @@ function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
   )
 }
 
-function AddEffectMenu({ onPick }: { onPick: (id: string) => void }) {
+function AddEffectMenu({
+  onPick,
+  onLook,
+}: {
+  onPick: (id: string) => void
+  onLook: (id: string) => void
+}) {
   return (
     <div className="flex max-h-[min(60vh,26rem)] flex-col gap-2 overflow-y-auto [scrollbar-width:thin]">
+      <div>
+        <div className="px-1.5 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+          Looks
+        </div>
+        <div className="grid grid-cols-2 gap-1">
+          {LOOKS.map((look) => (
+            <button
+              key={look.id}
+              type="button"
+              title={`${look.hint} (${look.layers.length} layers)`}
+              onClick={() => onLook(look.id)}
+              className="truncate rounded-lg border border-white/10 bg-[linear-gradient(135deg,oklch(0.42_0.09_250/0.55),oklch(0.42_0.11_340/0.55))] px-1.5 py-1.5 text-left text-xs text-foreground outline-none hover:border-white/40 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {look.label}
+            </button>
+          ))}
+        </div>
+      </div>
       {EFFECT_GROUPS.map((group) => (
         <div key={group}>
           <div className="px-1.5 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
@@ -456,6 +517,11 @@ export function LayersPanel() {
             <AddEffectMenu
               onPick={(type) => {
                 engine.addAdjustment(type)
+                setFxMenu(false)
+              }}
+              onLook={(lookId) => {
+                const look = LOOKS.find((l) => l.id === lookId)
+                if (look) engine.addAdjustments(look.layers)
                 setFxMenu(false)
               }}
             />

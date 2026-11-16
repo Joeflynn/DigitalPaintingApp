@@ -66,6 +66,30 @@ fn tap(uv: vec2f) -> vec4f {
   return textureSampleLevel(src, smp, uv, 0.0);
 }
 
+fn straight(t: vec4f) -> vec3f {
+  return t.rgb / max(t.a, 1e-5);
+}
+
+/// 4×4 ordered-dither threshold in 0–1 for an integer cell position.
+fn bayer(p: vec2f) -> f32 {
+  var m = array<f32, 16>(
+    0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+    3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+  let x = u32(p.x) & 3u;
+  let y = u32(p.y) & 3u;
+  return (m[y * 4u + x] + 0.5) / 16.0;
+}
+
+/// One bit of a 5×5 character bitmap; `p` runs 0–1 across the cell.
+fn glyph(n: i32, p: vec2f) -> f32 {
+  let q = floor((p * 2.0 - 1.0) * vec2f(-4.0, -4.0) + 2.5);
+  if (q.x < 0.0 || q.x > 4.0 || q.y < 0.0 || q.y > 4.0) {
+    return 0.0;
+  }
+  let bit = u32(q.x + 5.0 * q.y);
+  return f32((n >> bit) & 1);
+}
+
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let uv = pos.xy / u.doc.xy;
@@ -165,6 +189,201 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     }
     case 15 { // mask remap: threshold the blurred coverage
       r = vec4f(smoothstep(u.a.x, u.a.y, soft.a));
+      spatial = true;
+    }
+    case 16 { // rgb shift: amount px, angle, anaglyph mix
+      let ang = radians(u.a.y);
+      let d = vec2f(cos(ang), sin(ang)) * u.a.x / u.doc.xy;
+      let ra = tap(uv + d);
+      let ba = tap(uv - d);
+      let cover = max(o.a, max(ra.a, ba.a));
+      let parted = vec4f(ra.r, o.g, ba.b, cover);
+      let l2 = luma(ba.rgb);
+      r = mix(parted, vec4f(luma(ra.rgb), l2, l2, cover), u.a.z);
+      spatial = true;
+    }
+    case 17 { // crt: line pitch px, line strength, grille, curvature
+      let pitch = max(u.a.x, 1.0);
+      let k = u.a.w * 0.25;
+      let p = uv * 2.0 - 1.0;
+      let q = p * (1.0 + k * dot(p, p)) / (1.0 + k);
+      let cuv = q * 0.5 + 0.5;
+      let s = tap(cuv);
+      let wave = 0.5 + 0.5 * cos(cuv.y * u.doc.y / pitch * 6.2831853);
+      var rgb = s.rgb * (1.0 - u.a.y * (1.0 - wave)) * (1.0 + 0.45 * u.a.y);
+      let stripe = i32(floor(pos.x / max(1.0, round(pitch / 3.0)))) % 3;
+      let tri = vec3f(f32(stripe == 0), f32(stripe == 1), f32(stripe == 2));
+      rgb *= mix(vec3f(1.0), 0.55 + tri * 1.35, u.a.z);
+      rgb *= 1.0 - k * 1.6 * pow(dot(p, p) * 0.5, 1.5);
+      let inside = step(abs(q.x), 1.0) * step(abs(q.y), 1.0);
+      r = mix(vec4f(0.0, 0.0, 0.0, 1.0), vec4f(rgb, s.a), inside);
+      spatial = true;
+    }
+    case 18 { // vhs: chroma bleed px, wobble px, noise, tracking, seed
+      let seed = u.b.x;
+      let y = pos.y;
+      var xoff = (sin(y * 0.021 + seed * 1.7) * 0.6 + sin(y * 0.13 + seed) * 0.25
+        + (hash(vec2f(y, seed)) - 0.5) * 0.3) * u.a.y;
+      let bd = (y - hash(vec2f(seed, 3.3)) * u.doc.y) / (u.doc.y * 0.05);
+      let band = exp(-bd * bd) * u.a.w;
+      xoff += band * u.doc.x * 0.08 * (hash(vec2f(floor(y / 2.0), seed + 9.0)) - 0.2);
+      let head = smoothstep(0.965, 1.0, uv.y) * u.a.w;
+      xoff += head * u.doc.x * 0.06 * hash(vec2f(floor(y / 3.0), seed + 4.0));
+      let suv = uv + vec2f(xoff / u.doc.x, 0.0);
+      let lum = tap(suv);
+      var chroma = vec4f(0.0);
+      for (var i = 0; i < 8; i++) {
+        chroma += tap(suv + vec2f((f32(i) - 2.0) * u.a.x / 6.0 / u.doc.x, 0.0));
+      }
+      chroma /= 8.0;
+      var rgb = vec3f(luma(lum.rgb)) + (chroma.rgb - luma(chroma.rgb)) * 1.15;
+      rgb += (hash(pos.xy + seed * 13.0) - 0.5) * u.a.z * 0.4 * lum.a;
+      let speck = step(0.72, hash(vec2f(floor(pos.x / 9.0) + seed, floor(y / 2.0))));
+      rgb += (band + head) * speck * 0.6 * lum.a;
+      r = vec4f(rgb, lum.a);
+      spatial = true;
+    }
+    case 19 { // slices: shift px, slice height px, density, colour split px, seed
+      let seed = u.b.x;
+      let row = floor(pos.y / max(u.a.y, 1.0));
+      let hit = step(1.0 - u.a.z, hash(vec2f(row, seed)));
+      let off = (hash(vec2f(row, seed + 1.0)) - 0.5) * 2.0 * u.a.x * hit;
+      let base = uv + vec2f(off / u.doc.x, 0.0);
+      let sp = vec2f(u.a.w * hit / u.doc.x, 0.0);
+      let g = tap(fract(base));
+      let rr = tap(fract(base + sp));
+      let bb = tap(fract(base - sp));
+      r = vec4f(rr.r, g.g, bb.b, max(g.a, max(rr.a, bb.a)));
+      spatial = true;
+    }
+    case 20 { // data corrupt: block px, shift px, density, colour damage, seed
+      let seed = u.b.x;
+      let size = max(u.a.x, 2.0);
+      let cell = floor(pos.xy / vec2f(size * 2.0, size));
+      let hit = step(1.0 - u.a.z, hash(cell + seed * 17.0));
+      let off = (vec2f(hash(cell + seed + 1.3), hash(cell + seed + 7.1)) - 0.5)
+        * 2.0 * u.a.y * hit * vec2f(1.0, 0.2);
+      let s = tap(fract(uv + off / u.doc.xy));
+      var rgb = s.rgb;
+      let kind = hash(cell + seed + 23.7);
+      if (hit > 0.5 && kind < u.a.w) {
+        let pick = fract(kind * 91.7);
+        if (pick < 0.34) {
+          rgb = s.gbr;
+        } else if (pick < 0.67) {
+          rgb = s.a - s.rgb;
+        } else {
+          rgb = floor(s.rgb * 3.0 + 0.5) / 3.0;
+        }
+      }
+      r = vec4f(rgb, s.a);
+      spatial = true;
+    }
+    case 21 { // wave: amplitude px, wavelength px, angle, jagged
+      let ang = radians(u.a.z);
+      let dir = vec2f(cos(ang), sin(ang));
+      let t = dot(pos.xy, vec2f(-dir.y, dir.x)) / max(u.a.y, 1.0);
+      let stepped = (hash(vec2f(floor(t * 2.0), 4.2)) - 0.5) * 2.0;
+      let w = mix(sin(t * 6.2831853), stepped, u.a.w);
+      r = tap(uv + dir * w * u.a.x / u.doc.xy);
+      spatial = true;
+    }
+    case 22 { // pixel drift: length px, threshold, angle, ragged
+      let ang = radians(u.a.z);
+      let dir = vec2f(cos(ang), sin(ang));
+      let lane = floor(dot(pos.xy, vec2f(-dir.y, dir.x)) / 2.0);
+      let reach = u.a.x * mix(1.0, hash(vec2f(lane, 9.1)), u.a.w);
+      var best = o;
+      var score = luma(o.rgb);
+      for (var i = 1; i <= 48; i++) {
+        let t = f32(i) / 48.0;
+        let s = tap(uv - dir * t * reach / u.doc.xy);
+        let l = luma(s.rgb);
+        if (l > u.a.y && l * (1.0 - t * 0.5) > score) {
+          best = s;
+          score = l * (1.0 - t * 0.5);
+        }
+      }
+      r = best;
+      spatial = true;
+    }
+    case 23 { // duotone: shadow hue, highlight hue, saturation, contrast
+      let l = clamp((luma(c) - 0.5) * (1.0 + u.a.w * 1.5) + 0.5, 0.0, 1.0);
+      let dark = hsv2rgb(vec3f(u.a.x / 360.0, u.a.z, 0.22));
+      let light = hsv2rgb(vec3f(u.a.y / 360.0, u.a.z * 0.6, 1.0));
+      c = mix(dark, light, l);
+    }
+    case 24 { // spectrum map: cycles, offset, saturation, shade
+      let l = clamp(luma(c), 0.0, 1.0);
+      let hue = fract(u.a.y / 360.0 + l * u.a.x + 8.0);
+      c = hsv2rgb(vec3f(hue, u.a.z, mix(1.0, sqrt(l), u.a.w)));
+    }
+    case 25 { // dither: pixel px, levels, colour, tint hue, tint
+      let size = max(round(u.a.x), 1.0);
+      let cell = floor(pos.xy / size);
+      let s = tap((cell + 0.5) * size / u.doc.xy);
+      let sc = clamp(straight(s), vec3f(0.0), vec3f(1.0));
+      let n = max(round(u.a.y), 2.0) - 1.0;
+      let th = (bayer(cell) - 0.5) / n;
+      let cq = floor(clamp(sc + th, vec3f(0.0), vec3f(1.0)) * n + 0.5) / n;
+      let lq = floor(clamp(luma(sc) + th, 0.0, 1.0) * n + 0.5) / n;
+      var d = mix(vec3f(lq), cq, u.a.z);
+      let ink = hsv2rgb(vec3f(u.a.w / 360.0, 0.8, 1.0));
+      d = mix(d, mix(ink * 0.12, mix(ink, vec3f(1.0), 0.55), luma(d)), u.b.x);
+      r = vec4f(d * s.a, s.a);
+      spatial = true;
+    }
+    case 26 { // neon edges: width px, intensity, hue, source colour, background
+      let e = u.a.x / u.doc.xy;
+      let tl = luma(tap(uv + vec2f(-e.x, -e.y)).rgb);
+      let tc = luma(tap(uv + vec2f(0.0, -e.y)).rgb);
+      let tr = luma(tap(uv + vec2f(e.x, -e.y)).rgb);
+      let ml = luma(tap(uv + vec2f(-e.x, 0.0)).rgb);
+      let mr = luma(tap(uv + vec2f(e.x, 0.0)).rgb);
+      let bl = luma(tap(uv + vec2f(-e.x, e.y)).rgb);
+      let bc = luma(tap(uv + vec2f(0.0, e.y)).rgb);
+      let br = luma(tap(uv + vec2f(e.x, e.y)).rgb);
+      let gx = tr + 2.0 * mr + br - tl - 2.0 * ml - bl;
+      let gy = bl + 2.0 * bc + br - tl - 2.0 * tc - tr;
+      let edge = clamp(length(vec2f(gx, gy)) * u.a.y, 0.0, 1.0);
+      var hs = rgb2hsv(clamp(c, vec3f(0.0), vec3f(1.0)));
+      hs = vec3f(hs.x, max(hs.y, 0.65), 1.0);
+      let neon = mix(hsv2rgb(vec3f(u.a.z / 360.0, 1.0, 1.0)), hsv2rgb(hs), u.a.w);
+      c = mix(c * u.b.x, neon, edge);
+    }
+    case 27 { // kaleidoscope: segments, rotation, zoom
+      let p = pos.xy - 0.5 * u.doc.xy;
+      let rot = radians(u.a.y);
+      let seg = 6.2831853 / max(round(u.a.x), 1.0);
+      var a = atan2(p.y, p.x) - rot;
+      a = abs(a - seg * floor(a / seg) - seg * 0.5);
+      let q = vec2f(cos(a + rot), sin(a + rot)) * length(p) / max(u.a.z, 0.05);
+      let m = fract((q / u.doc.xy + 0.5) * 0.5) * 2.0;
+      r = tap(1.0 - abs(m - 1.0));
+      spatial = true;
+    }
+    case 28 { // solarize: threshold, softness
+      let w = u.a.y * 0.5 + 0.002;
+      c = mix(c, 1.0 - c, smoothstep(vec3f(u.a.x - w), vec3f(u.a.x + w), c));
+    }
+    case 29 { // ascii: cell px, source colour, tint hue
+      let size = max(u.a.x, 4.0);
+      let cell = floor(pos.xy / size);
+      let s = tap((cell + 0.5) * size / u.doc.xy);
+      let sc = clamp(straight(s), vec3f(0.0), vec3f(1.0));
+      let grey = luma(sc);
+      var n = 4096;
+      if (grey > 0.2) { n = 65600; }
+      if (grey > 0.3) { n = 332772; }
+      if (grey > 0.4) { n = 15255086; }
+      if (grey > 0.5) { n = 23385164; }
+      if (grey > 0.6) { n = 15252014; }
+      if (grey > 0.7) { n = 13199452; }
+      if (grey > 0.8) { n = 11512810; }
+      let on_ink = glyph(n, pos.xy / size - cell) * step(0.04, grey);
+      let tint = hsv2rgb(vec3f(u.a.z / 360.0, 0.85, 1.0)) * (0.45 + 0.55 * grey);
+      let lit = sc / max(max(sc.r, max(sc.g, sc.b)), 0.2);
+      r = vec4f(mix(tint, lit, u.a.y) * on_ink * s.a, s.a);
       spatial = true;
     }
     default {}
