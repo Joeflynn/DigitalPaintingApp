@@ -1,5 +1,13 @@
 /// <reference types="@webgpu/types" />
-import type { BrushPreset, TipShape } from "./brushes"
+import {
+  MASK_BLENDS,
+  PAINT_BLENDS,
+  STROKE_TEXTURE_KINDS,
+  TEXTURE_KINDS,
+  TIP_SHAPES,
+  type BrushPreset,
+} from "./brushes"
+import type { Dab } from "./stroke"
 import common from "./gpu/common.wgsl?raw"
 import depositSrc from "./gpu/deposit.wgsl?raw"
 import flowSrc from "./gpu/flow.wgsl?raw"
@@ -16,6 +24,8 @@ export interface StrokeSetup {
   brush: BrushPreset
   /** Straight RGB, 0–1 */
   color: [number, number, number]
+  /** Secondary colour that stamps may mix towards; defaults to `color` */
+  color2?: [number, number, number]
   /** Nominal brush diameter in document pixels */
   size: number
   opacity: number
@@ -24,12 +34,39 @@ export interface StrokeSetup {
   alphaLock?: boolean
 }
 
-const TIPS: TipShape[] = ["round", "grain", "bristle", "splatter", "chalk"]
 const FLOAT = "rgba16float" as const
-const DAB_FLOATS = 8
+const DAB_FLOATS = 16
 const CAPACITY = 8192
 const RESERVOIR = 32
-const PARAM_FLOATS = 36
+const PARAM_FLOATS = 68
+/** Side of a raster stamp or texture once it is on the GPU. */
+const IMAGE_SIZE = 256
+/** Shader code for "this layer is a raster image". */
+const RASTER = 100
+
+/** Index of a procedural kind as the shaders number it, or the raster code. */
+function kindOf<T extends string>(list: readonly T[], kind: T | "none" | "image"): number {
+  if (kind === "image") return RASTER
+  return list.indexOf(kind as T)
+}
+
+/** True if this brush needs the tip reservoir: it picks up or meters paint. */
+function usesReservoir(brush: BrushPreset): boolean {
+  return (
+    brush.pickup > 0 ||
+    (brush.links ?? []).some((l) => l.target === "load" && l.amount !== 0)
+  )
+}
+
+/** The raster images a brush actually samples. */
+function imagesOf(brush: BrushPreset): string[] {
+  const out: string[] = []
+  if (brush.tip === "image" && brush.tipImage) out.push(brush.tipImage)
+  if (brush.dual === "image" && brush.dualImage) out.push(brush.dualImage)
+  if (brush.texture === "image" && brush.textureImage) out.push(brush.textureImage)
+  if (brush.strokeTex === "image" && brush.strokeImage) out.push(brush.strokeImage)
+  return out
+}
 
 const LERP: GPUBlendState = {
   color: { srcFactor: "one", dstFactor: "one-minus-src-alpha" },
@@ -52,6 +89,13 @@ export class GPUBrush {
   private flow: GPURenderPipeline
   private resolve: GPURenderPipeline
   private sampler: GPUSampler
+  private repeat: GPUSampler
+  private white: GPUTexture
+  /** Raster stamps and textures by data URL. */
+  private images = new Map<string, GPUTexture>()
+  private loading = new Map<string, Promise<void>>()
+  /** Tip, dual stamp, canvas texture and stroke texture for this stroke. */
+  private layers: GPUTexture[] = []
   private uniform: GPUBuffer
   private storage: GPUBuffer
   private params = new Float32Array(PARAM_FLOATS)
@@ -67,6 +111,8 @@ export class GPUBrush {
 
   private setup: StrokeSetup | null = null
   private pending: number[] = []
+  private pendingLoad = 0
+  private reservoirOn = false
   private bounds: { x0: number; y0: number; x1: number; y1: number } | null = null
   private spread = 0
   private lastDistance = 0
@@ -103,9 +149,23 @@ export class GPUBrush {
     this.sampler = device.createSampler({
       magFilter: "linear",
       minFilter: "linear",
+      mipmapFilter: "linear",
       addressModeU: "clamp-to-edge",
       addressModeV: "clamp-to-edge",
     })
+    this.repeat = device.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+      mipmapFilter: "linear",
+      addressModeU: "repeat",
+      addressModeV: "repeat",
+    })
+    this.white = device.createTexture({
+      size: [1, 1],
+      format: "r8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    device.queue.writeTexture({ texture: this.white }, new Uint8Array([255]), {}, [1, 1])
     this.uniform = device.createBuffer({
       size: PARAM_FLOATS * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -148,6 +208,76 @@ export class GPUBrush {
     return renderer
   }
 
+  /**
+   * Loads the raster stamps and textures a brush uses. A stroke begun before
+   * they arrive paints as if they were blank, so call this when a brush is
+   * picked or edited.
+   */
+  preload(brush: BrushPreset): Promise<void> {
+    return Promise.all(imagesOf(brush).map((url) => this.load(url))).then(
+      () => undefined
+    )
+  }
+
+  private load(url: string): Promise<void> {
+    if (this.images.has(url)) return Promise.resolve()
+    let job = this.loading.get(url)
+    if (!job) {
+      job = this.decode(url)
+        .catch((error) => console.error("Brush image failed to load", error))
+        .finally(() => this.loading.delete(url))
+      this.loading.set(url, job)
+    }
+    return job
+  }
+
+  /** Decodes an image into a single-channel texture with a full mip chain. */
+  private async decode(url: string) {
+    const bitmap = await createImageBitmap(await (await fetch(url)).blob())
+    const levels = Math.log2(IMAGE_SIZE) + 1
+    const texture = this.device.createTexture({
+      size: [IMAGE_SIZE, IMAGE_SIZE],
+      format: "r8unorm",
+      mipLevelCount: levels,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    })
+    const canvas = document.createElement("canvas")
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!
+    for (let level = 0; level < levels; level++) {
+      const side = IMAGE_SIZE >> level
+      canvas.width = side
+      canvas.height = side
+      ctx.imageSmoothingQuality = "high"
+      ctx.drawImage(bitmap, 0, 0, side, side)
+      const rgba = ctx.getImageData(0, 0, side, side).data
+      const grey = new Uint8Array(side * side)
+      for (let i = 0; i < grey.length; i++) grey[i] = rgba[i * 4]
+      this.device.queue.writeTexture(
+        { texture, mipLevel: level },
+        grey,
+        { bytesPerRow: side },
+        [side, side]
+      )
+    }
+    bitmap.close()
+    // Keep the cache small: brushes come and go while they are being edited.
+    if (this.images.size >= 24) {
+      const oldest = this.images.keys().next().value as string
+      if (!this.layers.includes(this.images.get(oldest)!)) {
+        this.images.get(oldest)!.destroy()
+      }
+      this.images.delete(oldest)
+    }
+    this.images.set(url, texture)
+  }
+
+  private image(kind: string, url: string): GPUTexture {
+    if (kind !== "image" || !url) return this.white
+    const texture = this.images.get(url)
+    if (!texture) void this.load(url)
+    return texture ?? this.white
+  }
+
   /** True while the current stroke has wet paint that should keep moving. */
   get wet(): boolean {
     const s = this.setup
@@ -158,7 +288,8 @@ export class GPUBrush {
   get settleFrames(): number {
     const s = this.setup
     if (!s || !this.wet) return 0
-    return s.brush.drip > 0 ? Math.round(30 + 60 * s.brush.drip) : 30
+    if (s.brush.drip > 0) return Math.round(30 + 60 * s.brush.drip)
+    return Math.round(30 * Math.pow(2.5, (s.brush.dryTime - 0.5) * 2))
   }
 
   /** How far the simulation may have carried paint beyond the dabs, in px. */
@@ -217,46 +348,116 @@ export class GPUBrush {
 
     const { brush, mode } = setup
     const paint = mode === "paint"
+    const smudge = mode === "smudge"
+    this.pendingLoad = 0
+    this.reservoirOn = smudge || (paint && usesReservoir(brush))
+    this.layers = [
+      this.image(brush.tip, brush.tipImage),
+      this.image(brush.dual, brush.dualImage),
+      this.image(brush.texture, brush.textureImage),
+      this.image(brush.strokeTex, brush.strokeImage),
+    ]
+    const tipKind = kindOf(TIP_SHAPES, brush.tip)
     const p = this.params
     p.fill(0)
     p.set([setup.width, setup.height, setup.size, setup.seed], 0)
     p.set(paint ? [...setup.color, 1] : [0, 0, 0, 0], 4)
-    p.set(
-      [TIPS.indexOf(brush.tip), brush.hardness, brush.bristles, brush.grainScale],
-      8
-    )
+    p.set([...(setup.color2 ?? setup.color), 1], 8)
+    p.set([Math.max(0, tipKind), brush.hardness, brush.bristles, 0], 12)
     p.set(
       [
-        mode === "smudge" ? 0 : brush.grain,
         paint ? brush.wetness : 0,
-        mode === "smudge" ? 1 : paint ? brush.pickup : 0,
+        smudge ? 1 : paint ? brush.pickup : 0,
         paint ? brush.relief : 0,
-      ],
-      12
-    )
-    p.set(
-      [
         paint ? brush.depletion : 0,
-        paint ? brush.drip : 0,
-        setup.opacity,
-        (mode === "erase" ? 1 : 0) | (setup.alphaLock ? 2 : 0),
       ],
       16
     )
+    p.set(
+      [
+        paint ? brush.drip : 0,
+        setup.opacity,
+        (mode === "erase" ? 1 : 0) |
+          (setup.alphaLock ? 2 : 0) |
+          (this.reservoirOn ? 4 : 0),
+        paint ? PAINT_BLENDS.indexOf(brush.paintBlend) : 0,
+      ],
+      20
+    )
+    p[31] = brush.roundness
     if (this.wet) {
+      // Sliders sit at 0.5 by default, so each is doubled to a 0–2 multiplier.
+      const dry = 0.06 * Math.pow(4, 0.5 - brush.dryTime)
       p.set(
         [
-          brush.wetness * 0.12,
+          brush.wetness * 0.24 * brush.bleed,
           // Running paint stays wet for long enough that pooling would
           // etch an outline into it, so it gets very little.
-          brush.wetness * (brush.drip > 0 ? 0.02 : 0.08),
+          brush.wetness * 0.16 * brush.edgeDarken * (brush.drip > 0 ? 0.25 : 1),
           brush.drip * 1.5,
-          brush.drip > 0 ? 0.985 : 0.94,
+          brush.drip > 0 ? 0.985 : 1 - dry,
         ],
-        28
+        32
       )
     }
-    p[32] = brush.roundness
+    p.set(
+      [
+        paint ? brush.granulation : 0,
+        paint ? brush.feather : 0,
+        paint ? brush.pigmentVariation : 0,
+        brush.gloss,
+      ],
+      36
+    )
+    // Roughly how many dabs land on one pixel, for a tip crossing its width.
+    p[64] = Math.min(40, Math.max(1, 0.8 / Math.max(0.01, brush.spacing)))
+    // Smudging moves paint that is there, so only the tip shapes the mark.
+    const on = (depth: number) => !smudge && depth > 0
+    p.set(
+      [
+        on(brush.dualDepth) && brush.dual !== "none"
+          ? kindOf(TIP_SHAPES, brush.dual)
+          : -1,
+        brush.dualScale,
+        MASK_BLENDS.indexOf(brush.dualBlend),
+        brush.dualDepth,
+        brush.dualRotate,
+        brush.dualOffset,
+        0,
+        0,
+      ],
+      40
+    )
+    p.set(
+      [
+        on(brush.grain) && brush.texture !== "none"
+          ? kindOf(TEXTURE_KINDS, brush.texture)
+          : -1,
+        brush.grainScale,
+        MASK_BLENDS.indexOf(brush.textureBlend),
+        brush.grain,
+        brush.textureInvert ? 1 : 0,
+        0,
+        0,
+        0,
+      ],
+      48
+    )
+    p.set(
+      [
+        on(brush.strokeDepth) && brush.strokeTex !== "none"
+          ? kindOf(STROKE_TEXTURE_KINDS, brush.strokeTex)
+          : -1,
+        brush.strokeScale,
+        MASK_BLENDS.indexOf(brush.strokeBlend),
+        brush.strokeDepth,
+        brush.strokeInvert ? 1 : 0,
+        0,
+        0,
+        0,
+      ],
+      56
+    )
     this.device.queue.writeBuffer(this.uniform, 0, p)
 
     // Start from empty stroke buffers, a reservoir full of fresh paint and a
@@ -289,21 +490,13 @@ export class GPUBrush {
     }
   }
 
-  dab(
-    x: number,
-    y: number,
-    size: number,
-    angle: number,
-    flow: number,
-    pressure: number,
-    distance: number,
-    random: number
-  ) {
+  dab(d: Dab) {
     if (!this.setup) return
+    const { x, y, size, distance } = d
     // Brushes that pick up colour refresh their reservoir every fraction of a
     // brush width, so mixing does not depend on how fast the frames arrive.
     if (
-      this.params[14] > 0 &&
+      this.reservoirOn &&
       this.pending.length > 0 &&
       distance - this.lastDistance > this.setup.size * 0.06
     ) {
@@ -327,7 +520,27 @@ export class GPUBrush {
     if (this.pending.length === 0) {
       this.batchHeading = [this.heading.dx, this.heading.dy]
     }
-    this.pending.push(x, y, size, angle, flow, pressure, distance, random)
+    // Colour shifts belong to paint; erasing and smudging ignore them.
+    const paint = this.setup.mode === "paint"
+    this.pending.push(
+      x,
+      y,
+      size,
+      d.angle,
+      d.flow,
+      d.pressure,
+      distance,
+      d.random,
+      paint ? d.hue : 0,
+      paint ? d.sat : 0,
+      paint ? d.lum : 0,
+      paint ? d.mix2 : 0,
+      d.dir,
+      d.roundness,
+      d.texture,
+      d.wet
+    )
+    this.pendingLoad += d.load
     const r = size / 2 + 2
     const b = this.bounds
     this.bounds = b
@@ -392,7 +605,10 @@ export class GPUBrush {
     this.pending = []
     const count = data.length / DAB_FLOATS
     const p = this.params
-    const pickup = p[14]
+    const pickup = p[17]
+    // 1 lays fresh paint; towards 0 the tip only moves what is on the canvas.
+    const load = setup.mode === "paint" ? this.pendingLoad / count : 1
+    this.pendingLoad = 0
 
     // Reservoir footprint follows the first dab of the batch; how much it
     // exchanges depends on how far the brush has travelled since last time.
@@ -412,20 +628,27 @@ export class GPUBrush {
         data[2],
         data[3],
       ],
-      20
-    )
-    p.set(
-      smudge
-        ? [this.firstDeposit ? 1 : 1 - Math.exp(-travel * 1.3), 0, 1, 0]
-        : [pickup * moved, moved * (1 - pickup) * 0.6, 0, 0],
       24
     )
+    // A dry tip behaves like the smudge tool: it soaks up the canvas quickly
+    // and thins out over bare paper instead of reloading.
+    const soak = this.firstDeposit ? 1 : 1 - Math.exp(-travel * 1.3)
+    const dry = smudge ? 1 : 1 - load
+    p.set(
+      [
+        pickup * moved * (1 - dry) + soak * dry,
+        moved * (1 - pickup) * 0.6 * (1 - dry),
+        dry,
+      ],
+      28
+    )
+    p[31] = data[13]
     this.device.queue.writeBuffer(this.uniform, 0, p)
     this.device.queue.writeBuffer(this.storage, 0, data)
 
     const encoder = this.device.createCommandEncoder()
     const [t0, t1] = this.pairs[this.cur]
-    if (pickup > 0) {
+    if (this.reservoirOn) {
       const next = 1 - this.resCur
       const pass = encoder.beginRenderPass({
         colorAttachments: [
@@ -463,6 +686,8 @@ export class GPUBrush {
         { buffer: this.storage },
         this.res[this.resCur].createView(),
         this.sampler,
+        this.repeat,
+        ...this.layers.map((t) => t.createView()),
       ])
     )
     pass.draw(6, count)
@@ -475,7 +700,7 @@ export class GPUBrush {
     const b = this.bounds
     if (!b) return
     // Each step can move paint a few pixels, and drips further still.
-    this.spread += 3.2 + this.params[30] * 2.6
+    this.spread += 3.2 + this.params[34] * 2.6 + this.params[37] * 7
     const m = this.spread
     const x0 = Math.max(0, Math.floor(b.x0 - m))
     const y0 = Math.max(0, Math.floor(b.y0 - m))

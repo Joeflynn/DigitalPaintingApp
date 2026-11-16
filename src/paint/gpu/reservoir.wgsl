@@ -22,7 +22,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let dims = vec2f(textureDimensions(prev));
   // Framebuffer rows run top-down, matching the tip's v axis in the deposit pass.
   let uv = pos.xy / dims * 2.0 - 1.0;
-  let q = uv * vec2f(1.0, P.shape.x) * P.res0.z * 0.5;
+  let q = uv * vec2f(1.0, P.res1.w) * P.res0.z * 0.5;
   let c = cos(P.res0.w);
   let s = sin(P.res0.w);
   let p = P.res0.xy + vec2f(c * q.x - s * q.y, s * q.x + c * q.y);
@@ -34,7 +34,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       textureSampleLevel(baseTex, lin, st, 0.0),
       textureSampleLevel(t0, lin, st, 0.0),
       textureSampleLevel(t1, lin, st, 0.0),
-      P.flow.z,
+      P.flow.y,
+      P.flow.w,
     );
   }
 

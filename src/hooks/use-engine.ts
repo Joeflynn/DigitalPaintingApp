@@ -20,6 +20,8 @@ export function useShortcuts(togglePanels: () => void) {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (isTyping(e.target)) return
+      // A dialog such as the brush studio owns the keyboard while it is open.
+      if (document.querySelector("[data-modal]")) return
       const key = e.key.toLowerCase()
       const mod = e.ctrlKey || e.metaKey
 

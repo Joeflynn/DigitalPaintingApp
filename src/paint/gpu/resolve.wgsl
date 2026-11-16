@@ -31,7 +31,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var paint = a0.rgb;
   let alpha = a1.r;
 
-  let relief = P.media.w;
+  let relief = P.media.z;
   if (relief > 0.0) {
     let limit = vec2i(P.doc.xy) - vec2i(1);
     let slope = vec2f(
@@ -43,16 +43,19 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let halfway = normalize(light + vec3f(0.0, 0.0, 1.0));
     // Normalised so flat paint keeps its exact colour.
     let diffuse = dot(n, light) / light.z;
-    let glint = max(pow(max(dot(n, halfway), 0.0), 40.0) - pow(halfway.z, 40.0), 0.0);
+    // Gloss tightens the highlight as well as brightening it.
+    let gloss = P.sim2.w;
+    let shine = mix(14.0, 70.0, gloss);
+    let glint = max(pow(max(dot(n, halfway), 0.0), shine) - pow(halfway.z, shine), 0.0);
     paint = paint * clamp(mix(1.0, diffuse, 0.6), 0.35, 1.5)
-      + vec3f(1.0, 0.97, 0.9) * glint * relief * 0.45 * alpha;
+      + vec3f(1.0, 0.97, 0.9) * glint * relief * gloss * 0.9 * alpha;
     paint = min(paint, vec3f(alpha));
   }
 
-  let k = clamp(cover * P.flow.z, 0.0, 1.0);
-  var o = base * (1.0 - k) + vec4f(paint, alpha) * (k / cover);
+  let k = clamp(cover * P.flow.y, 0.0, 1.0);
+  var o = layPaint(base, vec4f(paint, alpha) / cover, k, P.flow.w);
 
-  if ((u32(P.flow.w) & 2u) != 0u) {
+  if ((u32(P.flow.z) & 2u) != 0u) {
     // Alpha lock: recolour existing pixels, never change their coverage.
     if (base.a <= 0.0) {
       return vec4f(0.0);

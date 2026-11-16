@@ -20,7 +20,7 @@ import {
 } from "./selection"
 import { hexToHsv, hexToRgb, hsvToHex, rgbToHsv, type HSV } from "./color"
 import { loadAutosave, saveAutosave, type SavedDoc } from "./storage"
-import { Stroke } from "./stroke"
+import { Stroke, type SampleExtra } from "./stroke"
 import {
   clamp,
   cloneCanvas,
@@ -982,6 +982,8 @@ export class PaintEngine {
     this.setState({
       toolSettings: { ...this.state.toolSettings, [tool]: next },
     })
+    // Raster stamps decode in the background; have them ready for the stroke.
+    void this.gpu?.preload(this.activeBrush(tool))
     this.updateCursor()
   }
 
@@ -1633,6 +1635,25 @@ export class PaintEngine {
     return this.simPressure
   }
 
+  /** Tilt and timing for brushes that respond to them. */
+  private sampleExtra(e: PointerEvent): SampleExtra {
+    const tilt =
+      e.pointerType === "pen" ? Math.hypot(e.tiltX, e.tiltY) / 60 : 0
+    return { tilt: clamp(tilt, 0, 1), time: e.timeStamp }
+  }
+
+  /** The previous colour doubles as the secondary colour for brushes. */
+  private secondaryRgb(): [number, number, number] {
+    const rgb = hexToRgb(hsvToHex(this.state.prevColor)) ?? [0, 0, 0]
+    return [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255]
+  }
+
+  /** The brush a paint tool is using, with any unsaved edits applied. */
+  activeBrush(tool: PaintTool): BrushPreset {
+    const settings = this.state.toolSettings[tool]
+    return { ...getBrush(settings.brushId), ...settings.dynamics }
+  }
+
   private onContext = (e: Event) => e.preventDefault()
 
   private onLeave = () => {
@@ -1741,7 +1762,7 @@ export class PaintEngine {
         }
       } else if (isPaintTool(tool)) {
         this.simPressure = 0.75
-        this.beginPaint(tool, layer, id, x, y, this.pressure(e))
+        this.beginPaint(tool, layer, id, x, y, this.pressure(e), this.sampleExtra(e))
       }
     }
     this.updateCursor()
@@ -1753,13 +1774,11 @@ export class PaintEngine {
     pointerId: number,
     x: number,
     y: number,
-    p: number
+    p: number,
+    extra: SampleExtra
   ) {
     const settings = this.state.toolSettings[tool]
-    let brush: BrushPreset = {
-      ...getBrush(settings.brushId),
-      ...settings.dynamics,
-    }
+    let brush = this.activeBrush(tool)
     if (tool === "smudge") {
       // Smudging moves paint that is already there, so the tip only needs a
       // steady contact; the tool's opacity acts as its strength.
@@ -1791,6 +1810,7 @@ export class PaintEngine {
         source: (onMask ? this.masks : this.canvases).get(layer.id),
         brush,
         color: [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255],
+        color2: onMask ? undefined : this.secondaryRgb(),
         size: settings.size,
         opacity: settings.opacity,
         seed: Math.random() * 1000,
@@ -1811,12 +1831,12 @@ export class PaintEngine {
       )
       return
     }
-    const stroke = new Stroke((...dab) => gpu.dab(...dab), brush, {
+    const stroke = new Stroke((dab) => gpu.dab(dab), brush, {
       size: settings.size,
       streamline: settings.streamline,
       mirrorX: this.state.symmetry ? this.state.docW / 2 : null,
     })
-    stroke.add(x, y, p)
+    stroke.add(x, y, p, extra)
     this.action = {
       kind: "stroke",
       pointerId,
@@ -1914,7 +1934,7 @@ export class PaintEngine {
         for (const ev of list) {
           const [lx, ly] = this.local(ev)
           const [x, y] = this.screenToDoc(lx, ly)
-          a.stroke.add(x, y, this.pressure(ev))
+          a.stroke.add(x, y, this.pressure(ev), this.sampleExtra(ev))
         }
         this.requestRender()
         break

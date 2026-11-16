@@ -1,24 +1,68 @@
-import type { BrushPreset } from "./brushes"
+import type { BrushLink, BrushPreset, LinkTarget } from "./brushes"
 import { clamp, lerp, mulberry32, type Rect } from "./util"
 
-/** Receives each dab the stroke places; the GPU renderer implements this. */
-export type DabSink = (
-  x: number,
-  y: number,
-  size: number,
-  angle: number,
-  flow: number,
-  pressure: number,
+/** One stamp of the brush. */
+export interface Dab {
+  x: number
+  y: number
+  /** Diameter in document pixels */
+  size: number
+  /** Tip rotation in radians */
+  angle: number
+  flow: number
+  pressure: number
   /** Distance travelled along the stroke, in document pixels */
-  distance: number,
+  distance: number
   /** A 0–1 random value unique to this dab */
   random: number
-) => void
+  /** Hue shift in turns, then saturation and luminance shifts (−1 to 1) */
+  hue: number
+  sat: number
+  lum: number
+  /** How much of the secondary colour this stamp carries (0–1) */
+  mix2: number
+  /** Heading of the stroke in radians */
+  dir: number
+  roundness: number
+  /** Scales the canvas texture's depth */
+  texture: number
+  /** Scales how much water the dab lays down */
+  wet: number
+  /** 1 lays fresh paint, 0 only moves what is already on the canvas */
+  load: number
+}
+
+/** Receives each dab the stroke places; the GPU renderer implements this. */
+export type DabSink = (dab: Dab) => void
 
 interface Pt {
   x: number
   y: number
   p: number
+  /** Speed, 0–1 */
+  v: number
+  /** Pen tilt away from upright, 0–1 */
+  t: number
+}
+
+const mix = (a: Pt, b: Pt, t: number): Pt => ({
+  x: lerp(a.x, b.x, t),
+  y: lerp(a.y, b.y, t),
+  p: lerp(a.p, b.p, t),
+  v: lerp(a.v, b.v, t),
+  t: lerp(a.t, b.t, t),
+})
+
+const SCALED: LinkTarget[] = ["size", "flow", "load", "wet", "texture", "roundness"]
+
+type Mods = Record<LinkTarget, number>
+
+/** Extra readings that may accompany a pointer sample. */
+export interface SampleExtra {
+  /** Pen tilt away from upright, 0–1 */
+  tilt?: number
+  /** Timestamp in milliseconds, used to measure speed */
+  time?: number
 }
 
 export interface StrokeOptions {
@@ -62,13 +106,18 @@ export class Stroke {
   private rand: () => number
 
   private pts: Pt[] = []
-  private smooth: Pt = { x: 0, y: 0, p: 0 }
-  private raw: Pt = { x: 0, y: 0, p: 0 }
+  private smooth: Pt = { x: 0, y: 0, p: 0, v: 0, t: 0 }
+  private raw: Pt = { x: 0, y: 0, p: 0, v: 0, t: 0 }
   private lastMid: Pt | null = null
   private residual = 0
   private ended = false
   private distance = 0
   private lastDir = 0
+  private lastTime: number | null = null
+  private speed = 0.35
+  private links: BrushLink[]
+  /** Colour shift chosen once for the whole stroke: hue, sat, lum. */
+  private tint: [number, number, number]
 
   constructor(sink: DabSink, brush: BrushPreset, opts: StrokeOptions) {
     this.sink = sink
@@ -77,23 +126,43 @@ export class Stroke {
     this.streamline = opts.streamline
     this.mirrorX = opts.mirrorX ?? null
     this.rand = mulberry32(opts.seed ?? (Math.random() * 1e9) | 0)
+    this.links = (brush.links ?? []).filter((l) => l.amount !== 0)
+    const r = this.rand
+    this.tint = [
+      brush.strokeHueJitter > 0 ? (r() - 0.5) * brush.strokeHueJitter : 0,
+      brush.strokeSatJitter > 0 ? (r() * 2 - 1) * brush.strokeSatJitter : 0,
+      brush.strokeLumJitter > 0 ? (r() * 2 - 1) * brush.strokeLumJitter * 0.6 : 0,
+    ]
   }
 
-  add(x: number, y: number, p: number) {
+  add(x: number, y: number, p: number, extra: SampleExtra = {}) {
     if (this.ended) return
     if (![x, y, p].every(Number.isFinite)) return
     p = Math.pow(clamp(p, 0, 1), this.brush.pressureCurve)
-    this.raw = { x, y, p }
+    const t = clamp(extra.tilt ?? 0, 0, 1)
+    // Speed in document pixels per millisecond, eased so it does not flicker.
+    if (extra.time !== undefined && Number.isFinite(extra.time)) {
+      if (this.lastTime !== null && extra.time > this.lastTime) {
+        const d = Math.hypot(x - this.raw.x, y - this.raw.y)
+        const v = 1 - Math.exp(-d / (extra.time - this.lastTime) / 1.2)
+        this.speed += (v - this.speed) * 0.35
+      }
+      this.lastTime = extra.time
+    }
+    const v = this.speed
+    this.raw = { x, y, p, v, t }
     if (this.pts.length === 0) {
-      this.smooth = { x, y, p }
-      this.pts.push({ x, y, p })
+      this.smooth = { ...this.raw }
+      this.pts.push({ ...this.raw })
       // Direction-following tips wait for the first movement to know which
       // way to face; everything else marks the paper immediately.
-      if (!this.brush.followDirection) this.dab(x, y, p, 0)
-      this.residual = this.brush.followDirection ? 0 : this.spacingFor(p)
+      if (!this.brush.followDirection) this.dab(this.raw, 0)
+      this.residual = this.brush.followDirection
+        ? 0
+        : this.spacingFor(this.sizeFor(p, this.mods(this.raw, 0.5)))
       return
     }
-    this.advance(x, y, p)
+    this.advance(this.raw)
   }
 
   end() {
@@ -106,35 +175,33 @@ export class Stroke {
           this.raw.y - this.smooth.y
         )
         if (d < 0.5) break
-        this.advance(this.raw.x, this.raw.y, this.raw.p)
+        this.advance(this.raw)
       }
     }
     const n = this.pts.length
     if (n >= 2 && this.lastMid) this.line(this.lastMid, this.pts[n - 1])
     // A tap with a direction-following tip never moved, so stamp it once.
     if (!this.dirty && this.pts.length > 0) {
-      this.dab(this.raw.x, this.raw.y, this.raw.p, this.lastDir)
+      this.dab(this.raw, this.lastDir)
     }
     this.ended = true
   }
 
-  private advance(x: number, y: number, p: number) {
+  private advance(to: Pt) {
     const k = 1 - this.streamline * 0.92
     const s = this.smooth
-    s.x += (x - s.x) * k
-    s.y += (y - s.y) * k
-    s.p += (p - s.p) * 0.6
+    s.x += (to.x - s.x) * k
+    s.y += (to.y - s.y) * k
+    s.p += (to.p - s.p) * 0.6
+    s.v += (to.v - s.v) * 0.6
+    s.t += (to.t - s.t) * 0.6
     const last = this.pts[this.pts.length - 1]
     if (Math.hypot(s.x - last.x, s.y - last.y) < 0.35) return
-    this.pts.push({ x: s.x, y: s.y, p: s.p })
+    this.pts.push({ ...s })
     const n = this.pts.length
     const a = this.pts[n - 2]
     const b = this.pts[n - 1]
-    const mid: Pt = {
-      x: (a.x + b.x) / 2,
-      y: (a.y + b.y) / 2,
-      p: (a.p + b.p) / 2,
-    }
+    const mid = mix(a, b, 0.5)
     if (!this.lastMid) this.line(a, mid)
     else this.quad(this.lastMid, a, mid)
     this.lastMid = mid
@@ -150,11 +217,8 @@ export class Stroke {
     for (let i = 1; i <= steps; i++) {
       const t = i / steps
       const u = 1 - t
-      const pt: Pt = {
-        x: u * u * a.x + 2 * u * t * c.x + t * t * b.x,
-        y: u * u * a.y + 2 * u * t * c.y + t * t * b.y,
-        p: u * u * a.p + 2 * u * t * c.p + t * t * b.p,
-      }
+      const q = (k: keyof Pt) => u * u * a[k] + 2 * u * t * c[k] + t * t * b[k]
+      const pt: Pt = { x: q("x"), y: q("y"), p: q("p"), v: q("v"), t: q("t") }
       this.line(prev, pt)
       prev = pt
     }
@@ -169,58 +233,128 @@ export class Stroke {
     if (!this.dirty) this.lastDir = target
     let pos = this.residual
     while (pos <= d) {
-      const t = pos / d
-      const p = lerp(a.p, b.p, t)
-      const step = this.spacingFor(p)
+      const pt = mix(a, b, pos / d)
+      const rnd = this.rand()
+      const mods = this.mods(pt, rnd)
+      const step = this.spacingFor(this.sizeFor(pt.p, mods))
       let turn = target - this.lastDir
       turn = Math.atan2(Math.sin(turn), Math.cos(turn))
       this.lastDir += turn * Math.min(1, (step / this.size) * 6)
-      this.dab(lerp(a.x, b.x, t), lerp(a.y, b.y, t), p, this.lastDir)
+      this.dab(pt, this.lastDir, mods)
       this.distance += step
       pos += step
     }
     this.residual = pos - d
   }
 
-  private sizeFor(p: number): number {
+  /** Evaluates the brush's links: scale factors, and offsets for the rest. */
+  private mods(pt: Pt, random: number): Mods {
+    const m: Mods = {
+      size: 1,
+      flow: 1,
+      load: 1,
+      wet: 1,
+      texture: 1,
+      roundness: 1,
+      scatter: 0,
+      angle: 0,
+      hue: 0,
+      sat: 0,
+      lum: 0,
+      mix2: 0,
+    }
+    if (this.links.length === 0) return m
+    const fade = clamp(
+      this.distance / Math.max(1, this.brush.fadeLength * this.size),
+      0,
+      1
+    )
+    const inputs = { pressure: pt.p, speed: pt.v, tilt: pt.t, fade, random }
+    for (const l of this.links) {
+      const v = Math.pow(clamp(inputs[l.input] ?? 0, 0, 1), l.curve || 1)
+      if (SCALED.includes(l.target)) {
+        m[l.target] *= l.amount >= 0 ? 1 - l.amount * (1 - v) : 1 + l.amount * v
+      } else {
+        m[l.target] += l.amount * v
+      }
+    }
+    return m
+  }
+
+  private sizeFor(p: number, mods: Mods): number {
     const b = this.brush
     return Math.max(
       0.6,
-      this.size * Math.max(b.minSize, 1 - b.sizePressure + b.sizePressure * p)
+      this.size *
+        Math.max(b.minSize, 1 - b.sizePressure + b.sizePressure * p) *
+        Math.max(0.02, mods.size)
     )
   }
 
-  private spacingFor(p: number): number {
-    return Math.max(0.5, this.brush.spacing * this.sizeFor(p))
+  private spacingFor(size: number): number {
+    return Math.max(0.5, this.brush.spacing * size)
   }
 
-  private dab(x: number, y: number, p: number, dir: number) {
+  private dab(pt: Pt, dir: number, mods = this.mods(pt, this.rand())) {
     const b = this.brush
     const rand = this.rand
-    let size = this.sizeFor(p)
+    const p = pt.p
+    let { x, y } = pt
+    let size = this.sizeFor(p, mods)
     if (b.sizeJitter > 0) size *= 1 - b.sizeJitter * rand()
     size = Math.max(0.6, size)
     const flow =
       b.flow *
       (1 - b.flowPressure + b.flowPressure * p) *
-      (1 - b.flowJitter * rand())
+      (1 - b.flowJitter * rand()) *
+      Math.max(0, mods.flow)
     if (flow <= 0.002) return
-    if (b.scatter > 0) {
+    const scatter = Math.max(0, b.scatter + mods.scatter)
+    if (scatter > 0) {
       const ang = rand() * Math.PI * 2
-      const dist = Math.sqrt(rand()) * b.scatter * size
+      const dist = Math.sqrt(rand()) * scatter * size
       x += Math.cos(ang) * dist
       y += Math.sin(ang) * dist
     }
-    let angle = (b.angle * Math.PI) / 180
+    let angle = (b.angle * Math.PI) / 180 + mods.angle * Math.PI
     if (b.followDirection) angle += dir
     if (b.angleJitter > 0) angle += (rand() - 0.5) * b.angleJitter * Math.PI * 2
     const random = rand()
 
-    this.sink(x, y, size, angle, flow, p, this.distance, random)
+    let hue = this.tint[0] + mods.hue
+    let sat = this.tint[1] + mods.sat
+    let lum = this.tint[2] + mods.lum
+    if (b.hueCycle !== 0) hue += (b.hueCycle * this.distance) / (this.size * 8)
+    if (b.hueJitter > 0) hue += (rand() - 0.5) * b.hueJitter
+    if (b.satJitter > 0) sat += (rand() * 2 - 1) * b.satJitter
+    if (b.lumJitter > 0) lum += (rand() * 2 - 1) * b.lumJitter * 0.6
+    let mix2 = mods.mix2
+    if (b.secondaryMix > 0) mix2 += rand() * b.secondaryMix
+
+    const dab: Dab = {
+      x,
+      y,
+      size,
+      angle,
+      flow,
+      pressure: p,
+      distance: this.distance,
+      random,
+      hue: hue - Math.floor(hue),
+      sat: clamp(sat, -1, 1),
+      lum: clamp(lum, -1, 1),
+      mix2: clamp(mix2, 0, 1),
+      dir,
+      roundness: clamp(b.roundness * mods.roundness, 0.05, 1),
+      texture: clamp(mods.texture, 0, 2),
+      wet: clamp(mods.wet, 0, 2),
+      load: clamp(mods.load, 0, 1),
+    }
+    this.sink(dab)
     this.dirty = growRect(this.dirty, x, y, size / 2 + 2)
     if (this.mirrorX !== null) {
       const mx = 2 * this.mirrorX - x
-      this.sink(mx, y, size, Math.PI - angle, flow, p, this.distance, random)
+      this.sink({ ...dab, x: mx, angle: Math.PI - angle, dir: Math.PI - dir })
       this.dirty = growRect(this.dirty, mx, y, size / 2 + 2)
     }
   }

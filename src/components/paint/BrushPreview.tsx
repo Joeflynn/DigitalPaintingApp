@@ -1,13 +1,13 @@
 import { useEffect, useRef } from "react"
 
 import type { BrushPreset } from "@/paint/brushes"
-import { GPUBrush } from "@/paint/gpu-brush"
+import type { GPUBrush } from "@/paint/gpu-brush"
+import { previewRenderer } from "@/paint/preview-gpu"
 import { sampleStroke, Stroke } from "@/paint/stroke"
 
 const W = 440
 const H = 100
 
-let renderer: Promise<GPUBrush> | undefined
 const cache = new Map<string, string>()
 
 /** Renders a sample stroke through the real brush shaders. */
@@ -18,12 +18,13 @@ function renderPreview(gpu: GPUBrush, brush: BrushPreset): string {
     height: H,
     brush,
     color: [0.62, 0.8, 0.93],
+    color2: [0.96, 0.62, 0.72],
     size,
     opacity: brush.opacity,
     seed: 123,
     mode: "paint",
   })
-  const stroke = new Stroke((...dab) => gpu.dab(...dab), brush, {
+  const stroke = new Stroke((dab) => gpu.dab(dab), brush, {
     size,
     streamline: 0,
     seed: 123,
@@ -40,7 +41,13 @@ function renderPreview(gpu: GPUBrush, brush: BrushPreset): string {
   return out.toDataURL()
 }
 
-export function BrushPreview({ brush }: { brush: BrushPreset }) {
+export function BrushPreview({
+  brush,
+  className,
+}: {
+  brush: BrushPreset
+  className?: string
+}) {
   const ref = useRef<HTMLImageElement>(null)
   const key = JSON.stringify(brush)
 
@@ -51,21 +58,17 @@ export function BrushPreview({ brush }: { brush: BrushPreset }) {
       if (ref.current) ref.current.src = cached
       return
     }
-    renderer ??= GPUBrush.create(() => {
-      renderer = undefined
-      cache.clear()
-    })
-    void renderer
-      .then((gpu) => {
+    const brush = JSON.parse(key) as BrushPreset
+    void previewRenderer(() => cache.clear())
+      .then(async (gpu) => {
+        await gpu.preload(brush)
         if (cancelled) return
-        const url = renderPreview(gpu, JSON.parse(key) as BrushPreset)
+        const url = renderPreview(gpu, brush)
         if (cache.size > 96) cache.clear()
         cache.set(key, url)
         if (ref.current) ref.current.src = url
       })
-      .catch(() => {
-        renderer = undefined
-      })
+      .catch(() => {})
     return () => {
       cancelled = true
     }
@@ -76,7 +79,7 @@ export function BrushPreview({ brush }: { brush: BrushPreset }) {
       ref={ref}
       alt=""
       draggable={false}
-      className="h-12 w-full object-contain opacity-90"
+      className={className ?? "h-12 w-full object-contain opacity-90"}
     />
   )
 }

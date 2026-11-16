@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 
 import { BrushPanel } from "@/components/paint/BrushPanel"
+import { BrushStudio } from "@/components/paint/BrushStudio"
 import { CanvasView } from "@/components/paint/CanvasView"
 import { ColorPanel } from "@/components/paint/ColorPanel"
 import { panelClass } from "@/components/paint/controls"
@@ -38,6 +39,9 @@ function Toast() {
 export function App() {
   const [panelsOpen, setPanelsOpen] = useState(true)
   const togglePanels = useCallback(() => setPanelsOpen((v) => !v), [])
+  const [studio, setStudio] = useState(false)
+  const closeStudio = useCallback(() => setStudio(false), [])
+  const { tool } = useEngine()
   useShortcuts(togglePanels)
 
   useEffect(() => {
@@ -57,13 +61,19 @@ export function App() {
               <ColorPanel />
             </section>
             <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Brushes">
-              <BrushPanel />
+              <BrushPanel onOpenStudio={() => setStudio(true)} />
             </section>
             <section className={cn(panelClass, "flex min-h-36 flex-[1.15] flex-col")} aria-label="Layers">
               <LayersPanel />
             </section>
           </aside>
         </>
+      )}
+      {studio && (
+        <BrushStudio
+          tool={tool === "eraser" ? "eraser" : "brush"}
+          onClose={closeStudio}
+        />
       )}
       <Toast />
     </div>
