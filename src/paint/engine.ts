@@ -6,7 +6,18 @@ import {
   MIN_BRUSH_SIZE,
 } from "./brushes"
 import { defaultFx, getEffect, type LayerFx } from "./effects"
+import { GPUAnts } from "./gpu-ants"
 import { GPUEffects } from "./gpu-effects"
+import {
+  floodSelect,
+  growDab,
+  isEmpty,
+  maskToCanvas,
+  SELECT_TOOLS,
+  unionRect,
+  type SelectMode,
+  type SelectTool,
+} from "./selection"
 import { hexToHsv, hexToRgb, hsvToHex, rgbToHsv, type HSV } from "./color"
 import { loadAutosave, saveAutosave, type SavedDoc } from "./storage"
 import { Stroke } from "./stroke"
@@ -16,9 +27,12 @@ import {
   cropCanvas,
   ctxOf,
   makeCanvas,
+  maskedBlend,
   uid,
   type Rect,
 } from "./util"
+
+export type { SelectMode, SelectTool }
 
 export type BlendMode =
   | "source-over"
@@ -72,10 +86,45 @@ export interface LayerMeta {
    * effect to everything beneath them (or, when clipped, to the layer below).
    */
   fx?: LayerFx
+  /** The layer has a mask: where the mask is empty the layer is hidden. */
+  mask?: boolean
+  /** The mask is kept but temporarily ignored. */
+  maskOff?: boolean
+  /** Changes whenever the mask's pixels change. */
+  maskRev?: number
+}
+
+/** Which of a layer's two canvases an edit goes to. */
+type Target = "pixels" | "mask"
+
+export type SelectModify = "feather" | "grow" | "shrink" | "smooth"
+
+export interface SelectOptions {
+  selMode: SelectMode
+  /** Soft edge, in px, given to rectangle and lasso selections. */
+  selFeather: number
+  wandTolerance: number
+  wandContiguous: boolean
+  /** Wand and selection brush read the whole picture, not just the layer. */
+  sampleAll: boolean
+  selBrushSize: number
+  /** Selection brush snaps to edges by following contrast. */
+  selBrushEdge: boolean
+  selBrushContrast: number
 }
 
 export type PaintTool = "brush" | "eraser" | "smudge"
-export type ToolId = PaintTool | "fill" | "eyedropper" | "move" | "hand"
+export type ToolId =
+  | PaintTool
+  | SelectTool
+  | "fill"
+  | "eyedropper"
+  | "move"
+  | "hand"
+
+export function isSelectTool(t: ToolId): t is SelectTool {
+  return (SELECT_TOOLS as string[]).includes(t)
+}
 
 export function isPaintTool(t: ToolId): t is PaintTool {
   return t === "brush" || t === "eraser" || t === "smudge"
@@ -89,8 +138,14 @@ export interface ToolSettings {
   streamline: number
 }
 
-export interface EngineState {
+export interface EngineState extends SelectOptions {
   ready: boolean
+  hasSelection: boolean
+  canReselect: boolean
+  /** The selection tool the tool rail's selection button stands for. */
+  selectTool: SelectTool
+  /** Painting goes to the active layer's mask rather than its pixels. */
+  editMask: boolean
   docW: number
   docH: number
   background: string
@@ -120,6 +175,9 @@ interface StructSnap {
   layers: LayerMeta[]
   activeLayerId: string
   canvases: Map<string, HTMLCanvasElement>
+  masks: Map<string, HTMLCanvasElement>
+  selection: HTMLCanvasElement | null
+  editMask: boolean
 }
 
 type Action =
@@ -128,6 +186,33 @@ type Action =
       pointerId: number
       stroke: Stroke
       layerId: string
+      target: Target
+    }
+  | {
+      kind: "marquee"
+      pointerId: number
+      mode: SelectMode
+      x0: number
+      y0: number
+      x1: number
+      y1: number
+      sx: number
+      sy: number
+    }
+  | { kind: "lasso"; pointerId: number; mode: SelectMode; pts: number[] }
+  | {
+      kind: "selbrush"
+      pointerId: number
+      mode: SelectMode
+      /** The selection as it was before this stroke. */
+      base: HTMLCanvasElement | null
+      /** The picture the brush reads edges from, when edge-aware. */
+      px: Uint8ClampedArray | null
+      mask: Uint8Array
+      stroke: HTMLCanvasElement
+      preview: HTMLCanvasElement
+      lx: number
+      ly: number
     }
   | { kind: "pan"; pointerId: number; lx: number; ly: number }
   | { kind: "rotate"; pointerId: number; last: number }
@@ -140,6 +225,8 @@ type Action =
       y0: number
       dx: number
       dy: number
+      /** Selected pixels lifted off the layer, and what they left behind. */
+      float?: { cut: HTMLCanvasElement; rest: HTMLCanvasElement }
     }
 
 interface Gesture {
@@ -199,15 +286,50 @@ export class PaintEngine {
     zoom: 1,
     rotation: 0,
     notice: null,
+    hasSelection: false,
+    canReselect: false,
+    selectTool: "select-rect",
+    editMask: false,
+    selMode: "replace",
+    selFeather: 0,
+    wandTolerance: 32,
+    wandContiguous: true,
+    sampleAll: true,
+    selBrushSize: 60,
+    selBrushEdge: true,
+    selBrushContrast: 30,
   }
 
   private listeners = new Set<() => void>()
   private canvases = new Map<string, HTMLCanvasElement>()
   private gpu: GPUBrush | null = null
   private fx: GPUEffects | null = null
+  private ants: GPUAnts | null = null
+  private masks = new Map<string, HTMLCanvasElement>()
+  /** Coverage of the current selection in its alpha channel, or null. */
+  private selection: HTMLCanvasElement | null = null
+  private lastSelection: HTMLCanvasElement | null = null
+  private selRev = 0
+  private antTimer = 0
+  /** Polygonal lasso in progress; it spans many clicks, so it is not an Action. */
+  private poly: {
+    pts: number[]
+    mode: SelectMode
+    hx: number
+    hy: number
+    t: number
+    sx: number
+    sy: number
+  } | null = null
+  /** Document-sized working canvases, made on first use. */
+  private scratches = new Map<string, HTMLCanvasElement>()
   /** A finished stroke whose wet paint is still flowing before it is committed. */
-  private settling: { stroke: Stroke; layerId: string; frames: number } | null =
-    null
+  private settling: {
+    stroke: Stroke
+    layerId: string
+    target: Target
+    frames: number
+  } | null = null
   private scratchB = makeCanvas(1, 1)
   /** Holds a base layer and its clipped layers while effects run on them. */
   private scratchG = makeCanvas(1, 1)
@@ -278,10 +400,12 @@ export class PaintEngine {
         this.action = null
         this.gpu = null
         this.fx = null
+        this.ants = null
         this.requestRender()
         this.notify("Graphics device lost. Reload to resume painting.")
       })
       this.fx = new GPUEffects(this.gpu.device)
+      this.ants = new GPUAnts(this.gpu.device)
     } catch {
       this.notify("Painting requires a browser with WebGPU enabled.")
     }
@@ -300,6 +424,8 @@ export class PaintEngine {
   private async loadSaved(doc: SavedDoc) {
     this.allocate(doc.width, doc.height)
     this.canvases.clear()
+    this.masks.clear()
+    this.resetSelection()
     for (const meta of doc.layers) {
       const c = meta.fx ? makeCanvas(1, 1) : makeCanvas(doc.width, doc.height)
       const blob = doc.blobs[meta.id]
@@ -310,7 +436,21 @@ export class PaintEngine {
         this.blobCache.set(meta.id, { rev: meta.rev, blob })
       }
       this.canvases.set(meta.id, c)
-      revCounter = Math.max(revCounter, meta.rev)
+      const maskBlob = meta.mask ? doc.blobs[`${meta.id}#mask`] : undefined
+      if (meta.mask) {
+        const mc = makeCanvas(doc.width, doc.height)
+        if (maskBlob) {
+          const bmp = await createImageBitmap(maskBlob)
+          ctxOf(mc).drawImage(bmp, 0, 0)
+          bmp.close()
+          this.blobCache.set(`${meta.id}#mask`, {
+            rev: meta.maskRev ?? 0,
+            blob: maskBlob,
+          })
+        }
+        this.masks.set(meta.id, mc)
+      }
+      revCounter = Math.max(revCounter, meta.rev, meta.maskRev ?? 0)
     }
     this.layerCounter = doc.layers.length
     this.undoStack = []
@@ -324,6 +464,9 @@ export class PaintEngine {
       showBackground: doc.showBackground,
       layers: doc.layers,
       activeLayerId: doc.activeLayerId,
+      hasSelection: false,
+      canReselect: false,
+      editMask: false,
       canUndo: false,
       canRedo: false,
     })
@@ -335,12 +478,31 @@ export class PaintEngine {
     this.scratchG = makeCanvas(w, h)
     this.comp = makeCanvas(w, h)
     this.compKey = null
+    this.scratches.clear()
+  }
+
+  private scratch(key: string): HTMLCanvasElement {
+    let c = this.scratches.get(key)
+    if (!c) {
+      c = makeCanvas(this.state.docW, this.state.docH)
+      this.scratches.set(key, c)
+    }
+    return c
+  }
+
+  private resetSelection() {
+    this.selection = null
+    this.lastSelection = null
+    this.poly = null
+    this.selRev++
   }
 
   newDocument(w: number, h: number, background = "#f6f3ec") {
     this.cancelAction()
     this.allocate(w, h)
     this.canvases.clear()
+    this.masks.clear()
+    this.resetSelection()
     this.blobCache.clear()
     this.layerCounter = 0
     const layer = this.makeLayer()
@@ -356,6 +518,9 @@ export class PaintEngine {
       showBackground: true,
       layers: [layer],
       activeLayerId: layer.id,
+      hasSelection: false,
+      canReselect: false,
+      editMask: false,
       canUndo: false,
       canRedo: false,
     })
@@ -385,10 +550,18 @@ export class PaintEngine {
     return this.state.layers.find((l) => l.id === this.state.activeLayerId)
   }
 
-  private bumpRev(id: string) {
+  getMaskCanvas(id: string): HTMLCanvasElement | undefined {
+    return this.masks.get(id)
+  }
+
+  private bumpRev(id: string, target: Target = "pixels") {
     this.setState({
       layers: this.state.layers.map((l) =>
-        l.id === id ? { ...l, rev: nextRev() } : l
+        l.id !== id
+          ? l
+          : target === "mask"
+            ? { ...l, maskRev: nextRev() }
+            : { ...l, rev: nextRev() }
       ),
     })
   }
@@ -437,12 +610,24 @@ export class PaintEngine {
       layers: this.state.layers,
       activeLayerId: this.state.activeLayerId,
       canvases: new Map(this.canvases),
+      masks: new Map(this.masks),
+      selection: this.selection,
+      editMask: this.state.editMask,
     }
   }
 
   private restore(s: StructSnap) {
     this.canvases = new Map(s.canvases)
-    this.setState({ layers: s.layers, activeLayerId: s.activeLayerId })
+    this.masks = new Map(s.masks)
+    this.poly = null
+    this.selection = s.selection
+    this.selRev++
+    this.setState({
+      layers: s.layers,
+      activeLayerId: s.activeLayerId,
+      hasSelection: !!s.selection,
+      editMask: s.editMask,
+    })
   }
 
   /** Runs a structural change and records before/after for undo. */
@@ -458,13 +643,18 @@ export class PaintEngine {
     this.requestRender()
   }
 
-  private applyPatch(layerId: string, r: Rect, patch: HTMLCanvasElement) {
-    const c = this.canvases.get(layerId)
+  private applyPatch(
+    layerId: string,
+    r: Rect,
+    patch: HTMLCanvasElement,
+    target: Target
+  ) {
+    const c = (target === "mask" ? this.masks : this.canvases).get(layerId)
     if (!c) return
     const ctx = ctxOf(c)
     ctx.clearRect(r.x, r.y, r.w, r.h)
     ctx.drawImage(patch, r.x, r.y)
-    this.bumpRev(layerId)
+    this.bumpRev(layerId, target)
   }
 
   // ---- layer operations ----------------------------------------------------
@@ -472,7 +662,7 @@ export class PaintEngine {
   setActiveLayer(id: string) {
     this.finishSettle()
     if (this.action) return
-    this.setState({ activeLayerId: id })
+    this.setState({ activeLayerId: id, editMask: false })
   }
 
   addLayer() {
@@ -571,6 +761,11 @@ export class PaintEngine {
         rev: nextRev(),
       }
       this.canvases.set(copy.id, cloneCanvas(src))
+      const mask = this.masks.get(id)
+      if (mask) {
+        this.masks.set(copy.id, cloneCanvas(mask))
+        copy.maskRev = nextRev()
+      }
       const next = this.state.layers.slice()
       next.splice(next.indexOf(meta) + 1, 0, copy)
       this.setState({ layers: next, activeLayerId: copy.id })
@@ -587,6 +782,7 @@ export class PaintEngine {
       const idx = layers.findIndex((l) => l.id === id)
       const next = layers.filter((l) => l.id !== id)
       this.canvases.delete(id)
+      this.masks.delete(id)
       let active = this.state.activeLayerId
       if (active === id) active = next[Math.max(0, idx - 1)].id
       this.setState({ layers: next, activeLayerId: active })
@@ -608,29 +804,74 @@ export class PaintEngine {
     }
     if (upper.fx && !this.fx) return
     this.structural(() => {
-      let merged: HTMLCanvasElement
-      const baked =
-        upper.fx &&
-        this.fx?.apply(this.canvases.get(lower.id)!, upper.fx, upper.opacity)
+      // Masks are baked in first: the merged layer has none.
+      const merged = this.bakedPixels(lower)
+      const upperMask = upper.mask && !upper.maskOff && this.masks.get(upper.id)
       if (upper.fx) {
         // Bake the effect into the pixels of the layer below.
-        merged = cloneCanvas(baked || this.canvases.get(lower.id)!)
+        const out = this.fx?.apply(merged, upper.fx, upper.opacity)
+        if (out) {
+          const baked = cloneCanvas(out)
+          if (upperMask) {
+            const { docW, docH } = this.state
+            const m = ctxOf(merged)
+            m.globalCompositeOperation = "copy"
+            m.drawImage(
+              maskedBlend(
+                makeCanvas(docW, docH),
+                makeCanvas(docW, docH),
+                this.bakedPixels(lower),
+                baked,
+                upperMask
+              ),
+              0,
+              0
+            )
+            m.globalCompositeOperation = "source-over"
+          } else {
+            const m = ctxOf(merged)
+            m.globalCompositeOperation = "copy"
+            m.drawImage(baked, 0, 0)
+            m.globalCompositeOperation = "source-over"
+          }
+        }
       } else {
-        merged = cloneCanvas(this.canvases.get(lower.id)!)
         const ctx = ctxOf(merged)
         ctx.globalAlpha = upper.opacity
         ctx.globalCompositeOperation = upper.clip ? "source-atop" : upper.blend
-        ctx.drawImage(this.canvases.get(upper.id)!, 0, 0)
+        ctx.drawImage(this.bakedPixels(upper), 0, 0)
+        ctx.globalAlpha = 1
+        ctx.globalCompositeOperation = "source-over"
       }
       this.canvases.set(lower.id, merged)
       this.canvases.delete(upper.id)
+      this.masks.delete(upper.id)
+      this.masks.delete(lower.id)
       this.setState({
         layers: layers
           .filter((l) => l.id !== upper.id)
-          .map((l) => (l.id === lower.id ? { ...l, rev: nextRev() } : l)),
+          .map((l) =>
+            l.id === lower.id
+              ? { ...l, rev: nextRev(), mask: false, maskOff: false }
+              : l
+          ),
         activeLayerId: lower.id,
+        editMask: false,
       })
     })
+  }
+
+  /** A copy of a layer's pixels with its mask, if any, applied. */
+  private bakedPixels(m: LayerMeta): HTMLCanvasElement {
+    const c = cloneCanvas(this.canvases.get(m.id)!)
+    const mask = m.mask && !m.maskOff && this.masks.get(m.id)
+    if (mask) {
+      const ctx = ctxOf(c)
+      ctx.globalCompositeOperation = "destination-in"
+      ctx.drawImage(mask, 0, 0)
+      ctx.globalCompositeOperation = "source-over"
+    }
+    return c
   }
 
   moveLayer(id: string, dir: 1 | -1) {
@@ -665,20 +906,25 @@ export class PaintEngine {
     }
   }
 
-  /** Replaces a layer's pixels with a new canvas, undoably. */
+  /** Replaces a layer's pixels (or its mask) with a new canvas, undoably. */
   private replaceCanvas(
     id: string,
-    build: (src: HTMLCanvasElement) => HTMLCanvasElement
+    build: (src: HTMLCanvasElement) => HTMLCanvasElement,
+    target: Target = "pixels"
   ) {
-    const src = this.canvases.get(id)
+    const map = target === "mask" ? this.masks : this.canvases
+    const src = map.get(id)
     if (!src) return
-    if (this.state.layers.find((l) => l.id === id)?.fx) {
+    if (
+      target === "pixels" &&
+      this.state.layers.find((l) => l.id === id)?.fx
+    ) {
       this.notify("Adjustment layers have no pixels to edit")
       return
     }
     this.structural(() => {
-      this.canvases.set(id, build(src))
-      this.bumpRev(id)
+      (target === "mask" ? this.masks : this.canvases).set(id, build(src))
+      this.bumpRev(id, target)
     })
   }
 
@@ -712,7 +958,13 @@ export class PaintEngine {
   // ---- tools & colour ------------------------------------------------------
 
   setTool(tool: ToolId) {
-    this.setState({ tool })
+    if (this.poly) {
+      this.poly = null
+      this.requestRender()
+    }
+    this.setState(
+      isSelectTool(tool) ? { tool, selectTool: tool } : { tool }
+    )
     this.updateCursor()
   }
 
@@ -743,6 +995,13 @@ export class PaintEngine {
   }
 
   nudgeSize(dir: 1 | -1) {
+    if (this.state.tool === "select-brush") {
+      const size = this.state.selBrushSize
+      this.setSelectOptions({
+        selBrushSize: size + dir * Math.max(1, Math.round(size * 0.12)),
+      })
+      return
+    }
     const tool = this.settingsTool()
     const size = this.state.toolSettings[tool].size
     const step = Math.max(1, Math.round(size * 0.12))
@@ -936,20 +1195,88 @@ export class PaintEngine {
     return base && !base.fx ? base : null
   }
 
-  /** A layer's pixels as they should appear right now, mid-action included. */
-  private sourceOf(m: LayerMeta) {
-    const src = this.canvases.get(m.id)
-    if (!src) return null
-    const a = this.action
+  /** True while the GPU brush is painting on this canvas of this layer. */
+  private isLive(m: LayerMeta, target: Target): boolean {
     const live = this.liveStroke()
-    if (live && this.gpu && live.layerId === m.id && live.stroke.dirty) {
-      // The GPU canvas shows this whole layer with the stroke applied.
-      return { src: this.gpu.canvas, ox: 0, oy: 0 }
+    return (
+      !!live &&
+      !!this.gpu &&
+      live.layerId === m.id &&
+      live.target === target &&
+      !!live.stroke.dirty
+    )
+  }
+
+  /**
+   * The GPU canvas shows the whole canvas being painted with the stroke
+   * applied; with a selection, the stroke only shows inside it.
+   */
+  private liveCanvas(before: HTMLCanvasElement): HTMLCanvasElement {
+    const gpu = this.gpu!
+    const sel = this.selection
+    if (!sel) return gpu.canvas
+    return maskedBlend(
+      this.scratch("live"),
+      this.scratch("tmp"),
+      before,
+      gpu.canvas,
+      sel
+    )
+  }
+
+  /** A layer's mask as it should apply right now, or null if it has none. */
+  private maskOf(m: LayerMeta) {
+    if (!m.mask || m.maskOff) return null
+    const src = this.masks.get(m.id)
+    if (!src) return null
+    if (this.isLive(m, "mask")) {
+      return { src: this.liveCanvas(src), ox: 0, oy: 0 }
     }
-    if (a?.kind === "move" && a.layerId === m.id) {
+    const a = this.action
+    if (a?.kind === "move" && a.layerId === m.id && !a.float) {
       return { src, ox: a.dx, oy: a.dy }
     }
     return { src, ox: 0, oy: 0 }
+  }
+
+  /** A layer's pixels as they should appear right now, mid-action included. */
+  private sourceOf(m: LayerMeta) {
+    const base = this.canvases.get(m.id)
+    if (!base) return null
+    let src: HTMLCanvasElement = base
+    let ox = 0
+    let oy = 0
+    const a = this.action
+    if (this.isLive(m, "pixels")) {
+      src = this.liveCanvas(base)
+    } else if (a?.kind === "move" && a.layerId === m.id) {
+      if (a.float) {
+        // Selected pixels ride along; the rest of the layer stays put.
+        src = this.scratch("live")
+        const L = ctxOf(src)
+        L.globalAlpha = 1
+        L.globalCompositeOperation = "copy"
+        L.drawImage(a.float.rest, 0, 0)
+        L.globalCompositeOperation = "source-over"
+        L.drawImage(a.float.cut, a.dx, a.dy)
+      } else {
+        ox = a.dx
+        oy = a.dy
+      }
+    }
+    const mask = this.maskOf(m)
+    if (mask) {
+      const masked = this.scratch("masked")
+      const M = ctxOf(masked)
+      M.globalAlpha = 1
+      M.globalCompositeOperation = "copy"
+      M.drawImage(src, ox, oy)
+      M.globalCompositeOperation = "destination-in"
+      M.drawImage(mask.src, mask.ox, mask.oy)
+      M.globalCompositeOperation = "source-over"
+      return { src: masked, ox: 0, oy: 0 }
+    }
+    return { src, ox, oy }
   }
 
   /** Draws paint layer `i`, masked by its clipping base if it has one. */
@@ -961,14 +1288,16 @@ export class PaintEngine {
     if (m.clip) {
       const base = this.baseOf(i)
       if (base && !base.fx) {
-        const baseCanvas = this.canvases.get(base.id)
-        if (!base.visible || !baseCanvas) return
+        if (!base.visible) return
         const B = ctxOf(this.scratchB)
         B.globalAlpha = 1
         B.globalCompositeOperation = "copy"
         B.drawImage(src, ox, oy)
+        // Only now fetch the base: it may reuse the canvas `src` was in.
+        const b = this.sourceOf(base)
+        if (!b) return
         B.globalCompositeOperation = "destination-in"
-        B.drawImage(baseCanvas, 0, 0)
+        B.drawImage(b.src, b.ox, b.oy)
         src = this.scratchB
         ox = 0
         oy = 0
@@ -997,14 +1326,33 @@ export class PaintEngine {
     return !!this.fx && this.state.layers.some((l) => l.fx && l.visible)
   }
 
-  /** Replaces a canvas's contents with an effect applied to them. */
+  /**
+   * Replaces a canvas's contents with an effect applied to them — everywhere,
+   * or only where the adjustment layer's mask allows.
+   */
   private applyFx(target: HTMLCanvasElement, m: LayerMeta) {
     const out = m.fx && this.fx?.apply(target, m.fx, m.opacity)
     if (!out) return
     const ctx = ctxOf(target)
+    const mask = this.maskOf(m)
     ctx.globalAlpha = 1
-    ctx.globalCompositeOperation = "copy"
-    ctx.drawImage(out, 0, 0)
+    if (mask) {
+      const masked = this.scratch("masked")
+      const M = ctxOf(masked)
+      M.globalAlpha = 1
+      M.globalCompositeOperation = "copy"
+      M.drawImage(out, 0, 0)
+      M.globalCompositeOperation = "destination-in"
+      M.drawImage(mask.src, mask.ox, mask.oy)
+      M.globalCompositeOperation = "source-over"
+      ctx.globalCompositeOperation = "destination-out"
+      ctx.drawImage(mask.src, mask.ox, mask.oy)
+      ctx.globalCompositeOperation = "lighter"
+      ctx.drawImage(masked, 0, 0)
+    } else {
+      ctx.globalCompositeOperation = "copy"
+      ctx.drawImage(out, 0, 0)
+    }
     ctx.globalCompositeOperation = "source-over"
   }
 
@@ -1030,6 +1378,9 @@ export class PaintEngine {
             l.blend,
             l.clip,
             l.fx,
+            l.mask,
+            l.maskOff,
+            l.maskRev,
           ]),
         ])
     if (key && key === this.compKey) return this.comp
@@ -1165,7 +1516,73 @@ export class PaintEngine {
       ctx.setLineDash([])
     }
 
+    this.drawOverlay(ctx, canvas)
+
     if (this.settling && --this.settling.frames <= 0) this.finishSettle()
+  }
+
+  /** Marching ants for the selection, and the outline of one being drawn. */
+  private drawOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) {
+    const a = this.action
+    const sel = this.selection
+    if (sel && this.ants && a?.kind !== "move") {
+      const ok = this.ants.draw(
+        sel,
+        this.selRev,
+        canvas.width,
+        canvas.height,
+        this.view,
+        this.dpr,
+        (performance.now() / 900) % 1
+      )
+      if (ok) {
+        ctx.save()
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.drawImage(this.ants.canvas, 0, 0)
+        ctx.restore()
+      }
+      if (!this.antTimer) {
+        this.antTimer = window.setTimeout(() => {
+          this.antTimer = 0
+          this.requestRender()
+        }, 110)
+      }
+    }
+
+    let pts: number[] | null = null
+    let closed = false
+    if (a?.kind === "marquee") {
+      pts = [a.x0, a.y0, a.x1, a.y0, a.x1, a.y1, a.x0, a.y1]
+      closed = true
+    } else if (a?.kind === "lasso") {
+      pts = a.pts
+    } else if (this.poly) {
+      pts = [...this.poly.pts, this.poly.hx, this.poly.hy]
+    }
+    if (!pts || pts.length < 4) return
+    const px = 1 / this.view.scale
+    ctx.beginPath()
+    ctx.moveTo(pts[0], pts[1])
+    for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1])
+    if (closed) ctx.closePath()
+    ctx.lineJoin = "round"
+    ctx.lineWidth = 1.5 * px
+    ctx.setLineDash([])
+    ctx.strokeStyle = "#fff"
+    ctx.stroke()
+    ctx.setLineDash([5 * px, 5 * px])
+    ctx.strokeStyle = "#000"
+    ctx.stroke()
+    ctx.setLineDash([])
+    if (this.poly) {
+      // The starting point: click it to close the shape.
+      ctx.beginPath()
+      ctx.arc(pts[0], pts[1], 4 * px, 0, Math.PI * 2)
+      ctx.fillStyle = "#fff"
+      ctx.fill()
+      ctx.lineWidth = px
+      ctx.stroke()
+    }
   }
 
   private updateCursor() {
@@ -1183,8 +1600,13 @@ export class PaintEngine {
             ? "move"
             : "crosshair"
     if (!el) return
+    const brushSize = isPaintTool(tool)
+      ? this.state.toolSettings[tool].size
+      : tool === "select-brush"
+        ? this.state.selBrushSize
+        : 0
     const show =
-      isPaintTool(tool) &&
+      brushSize > 0 &&
       this.pointerInside &&
       !this.spaceDown &&
       a?.kind !== "pan"
@@ -1192,10 +1614,7 @@ export class PaintEngine {
       el.style.opacity = "0"
       return
     }
-    const size = Math.max(
-      4,
-      this.state.toolSettings[tool].size * this.view.scale
-    )
+    const size = Math.max(4, brushSize * this.view.scale)
     el.style.opacity = "1"
     el.style.width = `${size}px`
     el.style.height = `${size}px`
@@ -1276,6 +1695,8 @@ export class PaintEngine {
         pointerId: id,
         last: Math.atan2(sy - this.vh / 2, sx - this.vw / 2),
       }
+    } else if (isSelectTool(tool) && e.button === 0) {
+      this.beginSelect(tool, e, id, x, y, sx, sy)
     } else if (e.altKey || e.button === 2 || tool === "eyedropper") {
       this.action = { kind: "pick", pointerId: id }
       this.pick(x, y)
@@ -1288,11 +1709,26 @@ export class PaintEngine {
         this.notify("The active layer is hidden")
         return
       }
-      if (layer.fx) {
+      const onMask = this.state.editMask && !!layer.mask
+      if (layer.fx && !(onMask || (tool === "move" && layer.mask))) {
         this.notify("Select a paint layer — adjustment layers hold no pixels")
         return
       }
       if (tool === "move") {
+        const sel = this.selection
+        const src = this.canvases.get(layer.id)
+        let float: { cut: HTMLCanvasElement; rest: HTMLCanvasElement } | undefined
+        if (sel && src && !layer.fx) {
+          const part = (op: GlobalCompositeOperation) => {
+            const c = cloneCanvas(src)
+            const cx = ctxOf(c)
+            cx.globalCompositeOperation = op
+            cx.drawImage(sel, 0, 0)
+            cx.globalCompositeOperation = "source-over"
+            return c
+          }
+          float = { cut: part("destination-in"), rest: part("destination-out") }
+        }
         this.action = {
           kind: "move",
           pointerId: id,
@@ -1301,8 +1737,9 @@ export class PaintEngine {
           y0: y,
           dx: 0,
           dy: 0,
+          float,
         }
-      } else {
+      } else if (isPaintTool(tool)) {
         this.simPressure = 0.75
         this.beginPaint(tool, layer, id, x, y, this.pressure(e))
       }
@@ -1338,21 +1775,32 @@ export class PaintEngine {
       this.notify("Painting requires WebGPU. Enable it and reload.")
       return
     }
-    if (tool === "brush") this.rememberColor()
-    const rgb = hexToRgb(hsvToHex(this.state.color)) ?? [0, 0, 0]
+    // On a mask the brush reveals with light colours and hides with dark.
+    const target: Target =
+      this.state.editMask && layer.mask ? "mask" : "pixels"
+    const onMask = target === "mask"
+    const hide = onMask && (tool === "eraser" || this.colorIsDark())
+    if (tool === "brush" && !onMask) this.rememberColor()
+    const rgb = onMask
+      ? [255, 255, 255]
+      : (hexToRgb(hsvToHex(this.state.color)) ?? [0, 0, 0])
     try {
       gpu.begin({
         width: this.state.docW,
         height: this.state.docH,
-        source: this.canvases.get(layer.id),
+        source: (onMask ? this.masks : this.canvases).get(layer.id),
         brush,
         color: [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255],
         size: settings.size,
         opacity: settings.opacity,
         seed: Math.random() * 1000,
         mode:
-          tool === "eraser" ? "erase" : tool === "smudge" ? "smudge" : "paint",
-        alphaLock: layer.alphaLock,
+          tool === "smudge"
+            ? "smudge"
+            : tool === "eraser" || hide
+              ? "erase"
+              : "paint",
+        alphaLock: !onMask && layer.alphaLock,
       })
     } catch (error) {
       console.error("Brush stroke initialization failed", error)
@@ -1369,7 +1817,13 @@ export class PaintEngine {
       mirrorX: this.state.symmetry ? this.state.docW / 2 : null,
     })
     stroke.add(x, y, p)
-    this.action = { kind: "stroke", pointerId, stroke, layerId: layer.id }
+    this.action = {
+      kind: "stroke",
+      pointerId,
+      stroke,
+      layerId: layer.id,
+      target,
+    }
     this.requestRender()
   }
 
@@ -1393,6 +1847,12 @@ export class PaintEngine {
     this.lastScreen = { x: sx, y: sy }
 
     if (!a || a.pointerId !== e.pointerId) {
+      if (!a && this.poly) {
+        const [x, y] = this.screenToDoc(sx, sy)
+        this.poly.hx = x
+        this.poly.hy = y
+        this.requestRender()
+      }
       this.updateCursor()
       return
     }
@@ -1422,6 +1882,24 @@ export class PaintEngine {
         a.dx = Math.round(x - a.x0)
         a.dy = Math.round(y - a.y0)
         this.requestRender()
+        break
+      }
+      case "marquee": {
+        const [x, y] = this.screenToDoc(sx, sy)
+        a.x1 = x
+        a.y1 = y
+        this.requestRender()
+        break
+      }
+      case "lasso": {
+        const [x, y] = this.screenToDoc(sx, sy)
+        a.pts.push(x, y)
+        this.requestRender()
+        break
+      }
+      case "selbrush": {
+        const [x, y] = this.screenToDoc(sx, sy)
+        this.selBrushTo(a, x, y)
         break
       }
       case "stroke": {
@@ -1461,21 +1939,34 @@ export class PaintEngine {
         a.stroke.end()
         const frames = this.gpu?.settleFrames ?? 0
         if (frames > 0 && a.stroke.dirty) {
-          this.settling = { stroke: a.stroke, layerId: a.layerId, frames }
+          this.settling = {
+            stroke: a.stroke,
+            layerId: a.layerId,
+            target: a.target,
+            frames,
+          }
         } else {
-          this.commitStroke(a.stroke, a.layerId)
+          this.commitStroke(a.stroke, a.layerId, a.target)
         }
         break
       }
       case "move":
-        if (a.dx !== 0 || a.dy !== 0) {
-          const { dx, dy } = a
-          this.replaceCanvas(a.layerId, (src) => {
-            const c = makeCanvas(src.width, src.height)
-            ctxOf(c).drawImage(src, dx, dy)
-            return c
-          })
-        }
+        if (a.dx !== 0 || a.dy !== 0) this.commitMove(a)
+        break
+      case "marquee": {
+        const [sx, sy] = this.local(e)
+        if (Math.hypot(sx - a.sx, sy - a.sy) < 3) this.selectClick(a.mode)
+        else this.finishShape(this.rectShape(a.x0, a.y0, a.x1, a.y1), a.mode)
+        break
+      }
+      case "lasso":
+        if (a.pts.length < 6) this.selectClick(a.mode)
+        else this.finishShape(this.pathShape(a.pts), a.mode)
+        break
+      case "selbrush":
+        this.putSelection(a.base)
+        // The brush marks whole pixels; soften the stair-steps a little.
+        this.finishShape(this.blurMask(a.stroke, 0.7), a.mode, false)
         break
       default:
         break
@@ -1495,7 +1986,7 @@ export class PaintEngine {
     const s = this.settling
     if (!s) return
     this.settling = null
-    this.commitStroke(s.stroke, s.layerId)
+    this.commitStroke(s.stroke, s.layerId, s.target)
     this.requestRender()
   }
 
@@ -1505,8 +1996,10 @@ export class PaintEngine {
    */
   private cancelAction() {
     this.finishSettle()
-    if (!this.action) return
+    const a = this.action
+    if (!a) return
     this.action = null
+    if (a.kind === "selbrush") this.putSelection(a.base)
     this.requestRender()
   }
 
@@ -1520,10 +2013,13 @@ export class PaintEngine {
     return w > 0 && h > 0 ? { x, y, w, h } : null
   }
 
-  /** Copies the stroke's footprint from the GPU canvas into the layer. */
-  private commitStroke(stroke: Stroke, layerId: string) {
+  /**
+   * Copies the stroke's footprint from the GPU canvas into the layer (or its
+   * mask), keeping it inside the selection if there is one.
+   */
+  private commitStroke(stroke: Stroke, layerId: string, target: Target) {
     const gpu = this.gpu
-    const canvas = this.canvases.get(layerId)
+    const canvas = (target === "mask" ? this.masks : this.canvases).get(layerId)
     const d = stroke.dirty
     if (!gpu || !canvas || !d) return
     // Resolve in this task so the GPU canvas is readable by drawImage below.
@@ -1540,12 +2036,684 @@ export class PaintEngine {
     const before = cropCanvas(canvas, r)
     ctx.clearRect(r.x, r.y, r.w, r.h)
     ctx.drawImage(gpu.canvas, r.x, r.y, r.w, r.h, r.x, r.y, r.w, r.h)
+    const sel = this.selection
+    if (sel) {
+      const held = maskedBlend(
+        makeCanvas(r.w, r.h),
+        makeCanvas(r.w, r.h),
+        before,
+        cropCanvas(canvas, r),
+        sel,
+        r.x,
+        r.y
+      )
+      ctx.clearRect(r.x, r.y, r.w, r.h)
+      ctx.drawImage(held, r.x, r.y)
+    }
     const after = cropCanvas(canvas, r)
-    this.bumpRev(layerId)
+    this.bumpRev(layerId, target)
     this.pushUndo({
-      undo: () => this.applyPatch(layerId, r, before),
-      redo: () => this.applyPatch(layerId, r, after),
+      undo: () => this.applyPatch(layerId, r, before, target),
+      redo: () => this.applyPatch(layerId, r, after, target),
     })
+  }
+
+  /** Finishes a move-tool drag: the layer and its mask, or the selected pixels. */
+  private commitMove(a: Extract<Action, { kind: "move" }>) {
+    const { dx, dy, layerId, float } = a
+    const shifted = (src: HTMLCanvasElement) => {
+      const c = makeCanvas(src.width, src.height)
+      ctxOf(c).drawImage(src, dx, dy)
+      return c
+    }
+    this.structural(() => {
+      const meta = this.state.layers.find((l) => l.id === layerId)
+      const src = this.canvases.get(layerId)
+      if (!meta || !src) return
+      if (float) {
+        const c = cloneCanvas(float.rest)
+        ctxOf(c).drawImage(float.cut, dx, dy)
+        this.canvases.set(layerId, c)
+        this.bumpRev(layerId)
+        const sel = this.selection
+        if (sel) {
+          const moved = shifted(sel)
+          this.putSelection(isEmpty(moved) ? null : moved)
+        }
+        return
+      }
+      if (!meta.fx) {
+        this.canvases.set(layerId, shifted(src))
+        this.bumpRev(layerId)
+      }
+      const mask = this.masks.get(layerId)
+      if (mask) {
+        this.masks.set(layerId, shifted(mask))
+        this.bumpRev(layerId, "mask")
+      }
+    })
+  }
+
+  // ---- selection -----------------------------------------------------------
+
+  private putSelection(c: HTMLCanvasElement | null) {
+    this.selection = c
+    if (c) this.lastSelection = c
+    this.selRev++
+    const canReselect = !!this.lastSelection
+    if (
+      this.state.hasSelection !== !!c ||
+      this.state.canReselect !== canReselect
+    ) {
+      this.setState({ hasSelection: !!c, canReselect })
+    }
+    this.requestRender()
+  }
+
+  /** Replaces the selection, undoably. An empty selection becomes none. */
+  private commitSelection(next: HTMLCanvasElement | null) {
+    if (next && isEmpty(next)) next = null
+    if (!next && !this.selection) return
+    this.structural(() => this.putSelection(next))
+  }
+
+  private blank(): HTMLCanvasElement {
+    return makeCanvas(this.state.docW, this.state.docH)
+  }
+
+  private full(): HTMLCanvasElement {
+    const c = this.blank()
+    const ctx = ctxOf(c)
+    ctx.fillStyle = "#fff"
+    ctx.fillRect(0, 0, c.width, c.height)
+    return c
+  }
+
+  /** The selection that results from applying `shape` in the given mode. */
+  private combine(shape: HTMLCanvasElement, mode: SelectMode) {
+    const base = this.selection
+    if (mode === "replace" || (!base && mode === "add")) return shape
+    if (!base) return this.blank()
+    const c = cloneCanvas(base)
+    const ctx = ctxOf(c)
+    ctx.globalCompositeOperation =
+      mode === "add"
+        ? "source-over"
+        : mode === "subtract"
+          ? "destination-out"
+          : "destination-in"
+    ctx.drawImage(shape, 0, 0)
+    ctx.globalCompositeOperation = "source-over"
+    return c
+  }
+
+  private blurMask(c: HTMLCanvasElement, sigma: number): HTMLCanvasElement {
+    if (!this.fx || sigma <= 0) return c
+    const out = this.fx.apply(
+      c,
+      { type: "blur", params: { radius: sigma * 2 } },
+      1
+    )
+    return out ? cloneCanvas(out) : c
+  }
+
+  /** Blurs a mask by `sigma` then thresholds its coverage between lo and hi. */
+  private remapMask(c: HTMLCanvasElement, sigma: number, lo: number, hi: number) {
+    const out = this.fx?.apply(
+      c,
+      { type: "mask-remap", params: { lo, hi, sigma } },
+      1
+    )
+    return out ? cloneCanvas(out) : c
+  }
+
+  private finishShape(shape: HTMLCanvasElement, mode: SelectMode, feather = true) {
+    const f = this.state.selFeather
+    if (feather && f > 0) shape = this.blurMask(shape, f)
+    this.commitSelection(this.combine(shape, mode))
+  }
+
+  /** A click with a drag tool: clears the selection unless adding to it. */
+  private selectClick(mode: SelectMode) {
+    if (mode === "replace") this.commitSelection(null)
+  }
+
+  private rectShape(x0: number, y0: number, x1: number, y1: number) {
+    const c = this.blank()
+    const ctx = ctxOf(c)
+    const l = Math.round(Math.min(x0, x1))
+    const t = Math.round(Math.min(y0, y1))
+    ctx.fillStyle = "#fff"
+    ctx.fillRect(
+      l,
+      t,
+      Math.round(Math.max(x0, x1)) - l,
+      Math.round(Math.max(y0, y1)) - t
+    )
+    return c
+  }
+
+  private pathShape(pts: number[]) {
+    const c = this.blank()
+    const ctx = ctxOf(c)
+    ctx.beginPath()
+    ctx.moveTo(pts[0], pts[1])
+    for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1])
+    ctx.closePath()
+    ctx.fillStyle = "#fff"
+    ctx.fill()
+    return c
+  }
+
+  /** Shift adds, Alt subtracts, both intersect; otherwise the chosen mode. */
+  private modeFor(e: PointerEvent): SelectMode {
+    if (e.shiftKey && e.altKey) return "intersect"
+    if (e.shiftKey) return "add"
+    if (e.altKey) return "subtract"
+    return this.state.selMode
+  }
+
+  private beginSelect(
+    tool: SelectTool,
+    e: PointerEvent,
+    pointerId: number,
+    x: number,
+    y: number,
+    sx: number,
+    sy: number
+  ) {
+    const mode = this.modeFor(e)
+    switch (tool) {
+      case "select-rect":
+        this.action = {
+          kind: "marquee",
+          pointerId,
+          mode,
+          x0: x,
+          y0: y,
+          x1: x,
+          y1: y,
+          sx,
+          sy,
+        }
+        break
+      case "select-lasso":
+        this.action = { kind: "lasso", pointerId, mode, pts: [x, y] }
+        break
+      case "select-poly":
+        this.polyClick(x, y, sx, sy, mode)
+        break
+      case "select-wand":
+        this.wandAt(x, y, mode)
+        break
+      case "select-brush": {
+        const { docW, docH } = this.state
+        const a: Extract<Action, { kind: "selbrush" }> = {
+          kind: "selbrush",
+          pointerId,
+          mode,
+          base: this.selection,
+          px: this.state.selBrushEdge ? this.readPixels().data : null,
+          mask: new Uint8Array(docW * docH),
+          stroke: this.blank(),
+          preview: this.blank(),
+          lx: x,
+          ly: y,
+        }
+        this.action = a
+        this.selBrushDabs(a, [x, y])
+        break
+      }
+    }
+    this.requestRender()
+  }
+
+  private polyClick(x: number, y: number, sx: number, sy: number, mode: SelectMode) {
+    const now = performance.now()
+    const p = this.poly
+    if (!p) {
+      this.poly = { pts: [x, y], mode, hx: x, hy: y, t: now, sx, sy }
+      return
+    }
+    const { tx, ty, scale, rot } = this.view
+    const c = Math.cos(rot)
+    const s = Math.sin(rot)
+    const fx = tx + scale * (p.pts[0] * c - p.pts[1] * s)
+    const fy = ty + scale * (p.pts[0] * s + p.pts[1] * c)
+    const double = now - p.t < 320 && Math.hypot(sx - p.sx, sy - p.sy) < 6
+    const atStart = p.pts.length >= 6 && Math.hypot(sx - fx, sy - fy) < 10
+    if (double || atStart) {
+      this.closePolygon()
+      return
+    }
+    p.pts.push(x, y)
+    p.t = now
+    p.sx = sx
+    p.sy = sy
+  }
+
+  /** Closes the polygonal lasso into a selection. */
+  closePolygon() {
+    const p = this.poly
+    if (!p) return
+    this.poly = null
+    if (p.pts.length >= 6) this.finishShape(this.pathShape(p.pts), p.mode)
+    this.requestRender()
+  }
+
+  /** The picture the wand and selection brush judge colours by. */
+  private readPixels(): ImageData {
+    const { docW, docH, background, showBackground, sampleAll } = this.state
+    const c = makeCanvas(docW, docH)
+    const ctx = c.getContext("2d", { willReadFrequently: true })!
+    const layer = this.activeLayer()
+    if (sampleAll || !layer || layer.fx) {
+      if (showBackground) {
+        ctx.fillStyle = background
+        ctx.fillRect(0, 0, docW, docH)
+      }
+      if (this.fxActive()) ctx.drawImage(this.compose(), 0, 0)
+      else this.drawLayers(ctx)
+    } else {
+      const s = this.sourceOf(layer)
+      if (s) ctx.drawImage(s.src, s.ox, s.oy)
+    }
+    return ctx.getImageData(0, 0, docW, docH)
+  }
+
+  private wandAt(fx: number, fy: number, mode: SelectMode) {
+    const { docW: w, docH: h, wandTolerance, wandContiguous } = this.state
+    const x = Math.floor(fx)
+    const y = Math.floor(fy)
+    if (x < 0 || y < 0 || x >= w || y >= h) {
+      this.selectClick(mode)
+      return
+    }
+    const mask = floodSelect(
+      this.readPixels().data,
+      w,
+      h,
+      x,
+      y,
+      wandTolerance,
+      wandContiguous
+    )
+    const shape = this.blank()
+    maskToCanvas(mask, w, { x: 0, y: 0, w, h }, ctxOf(shape))
+    this.finishShape(this.blurMask(shape, 0.7), mode, false)
+  }
+
+  private selBrushTo(a: Extract<Action, { kind: "selbrush" }>, x: number, y: number) {
+    const step = Math.max(1, this.state.selBrushSize * 0.18)
+    const dist = Math.hypot(x - a.lx, y - a.ly)
+    const n = Math.floor(dist / step)
+    if (n === 0) return
+    const pts: number[] = []
+    for (let i = 1; i <= n; i++) {
+      const t = (i * step) / dist
+      pts.push(a.lx + (x - a.lx) * t, a.ly + (y - a.ly) * t)
+    }
+    a.lx = pts[pts.length - 2]
+    a.ly = pts[pts.length - 1]
+    this.selBrushDabs(a, pts)
+  }
+
+  private selBrushDabs(a: Extract<Action, { kind: "selbrush" }>, pts: number[]) {
+    const { docW: w, docH: h, selBrushSize, selBrushContrast } = this.state
+    let rect: Rect | null = null
+    for (let i = 0; i < pts.length; i += 2) {
+      rect = unionRect(
+        rect,
+        growDab(a.px, w, h, a.mask, pts[i], pts[i + 1], selBrushSize / 2, selBrushContrast)
+      )
+    }
+    if (!rect) return
+    maskToCanvas(a.mask, w, rect, ctxOf(a.stroke))
+    // Show the selection as it will be once this stroke is applied.
+    const P = ctxOf(a.preview)
+    P.globalCompositeOperation = "copy"
+    if (a.mode === "replace" || (!a.base && a.mode === "add")) {
+      P.drawImage(a.stroke, 0, 0)
+    } else if (!a.base) {
+      P.clearRect(0, 0, w, h)
+    } else {
+      P.drawImage(a.base, 0, 0)
+      P.globalCompositeOperation =
+        a.mode === "add"
+          ? "source-over"
+          : a.mode === "subtract"
+            ? "destination-out"
+            : "destination-in"
+      P.drawImage(a.stroke, 0, 0)
+    }
+    P.globalCompositeOperation = "source-over"
+    this.selection = a.preview
+    this.selRev++
+    if (!this.state.hasSelection) this.setState({ hasSelection: true })
+    this.requestRender()
+  }
+
+  setSelectOptions(patch: Partial<SelectOptions>) {
+    const next = { ...patch }
+    if (next.selFeather !== undefined) next.selFeather = clamp(next.selFeather, 0, 250)
+    if (next.wandTolerance !== undefined)
+      next.wandTolerance = clamp(Math.round(next.wandTolerance), 0, 255)
+    if (next.selBrushSize !== undefined)
+      next.selBrushSize = clamp(Math.round(next.selBrushSize), 4, 600)
+    if (next.selBrushContrast !== undefined)
+      next.selBrushContrast = clamp(Math.round(next.selBrushContrast), 1, 100)
+    this.setState(next)
+    this.updateCursor()
+  }
+
+  selectAll() {
+    this.commitSelection(this.full())
+  }
+
+  deselect() {
+    this.poly = null
+    this.commitSelection(null)
+    this.requestRender()
+  }
+
+  reselect() {
+    if (!this.selection && this.lastSelection) {
+      this.commitSelection(this.lastSelection)
+    }
+  }
+
+  invertSelection() {
+    const c = this.full()
+    const sel = this.selection
+    if (sel) {
+      const ctx = ctxOf(c)
+      ctx.globalCompositeOperation = "destination-out"
+      ctx.drawImage(sel, 0, 0)
+    }
+    this.commitSelection(c)
+  }
+
+  /** Selects wherever the active layer has paint. */
+  selectLayerPixels() {
+    const layer = this.activeLayer()
+    if (!layer || layer.fx) {
+      this.notify("Adjustment layers hold no pixels to select")
+      return
+    }
+    const c = this.full()
+    const ctx = ctxOf(c)
+    ctx.globalCompositeOperation = "destination-in"
+    ctx.drawImage(this.bakedPixels(layer), 0, 0)
+    this.commitSelection(this.combine(c, this.state.selMode))
+  }
+
+  modifySelection(kind: SelectModify, px: number) {
+    const sel = this.selection
+    if (!sel || px <= 0) return
+    if (!this.fx) {
+      this.notify("Changing a selection's edge requires WebGPU.")
+      return
+    }
+    let next: HTMLCanvasElement
+    if (kind === "feather") {
+      next = this.blurMask(sel, px)
+    } else if (kind === "smooth") {
+      const w = 0.2 / px
+      next = this.remapMask(sel, px, 0.5 - w, 0.5 + w)
+    } else {
+      // A Gaussian edge crosses these coverages `px` either side of centre.
+      const sigma = Math.max(0.5, px * 0.6)
+      const w = 0.05 / sigma
+      const t = kind === "grow" ? 0.048 : 0.952
+      next = this.remapMask(sel, sigma, Math.max(0.004, t - w), Math.min(0.996, t + w))
+    }
+    this.commitSelection(next)
+  }
+
+  /** Where edits go: the active layer's pixels, or its mask when editing that. */
+  private editTarget(): { layer: LayerMeta; target: Target } | null {
+    const layer = this.activeLayer()
+    if (!layer) return null
+    if (this.state.editMask && layer.mask) return { layer, target: "mask" }
+    if (layer.fx) {
+      this.notify("Select a paint layer — adjustment layers hold no pixels")
+      return null
+    }
+    return { layer, target: "pixels" }
+  }
+
+  private colorIsDark(): boolean {
+    const rgb = hexToRgb(hsvToHex(this.state.color)) ?? [0, 0, 0]
+    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] < 128
+  }
+
+  /** Erases the selected area (the whole layer if nothing is selected). */
+  clearSelection() {
+    const t = this.editTarget()
+    if (!t) return
+    const sel = this.selection
+    this.replaceCanvas(
+      t.layer.id,
+      (src) => {
+        if (!sel) return makeCanvas(src.width, src.height)
+        const c = cloneCanvas(src)
+        const ctx = ctxOf(c)
+        ctx.globalCompositeOperation = "destination-out"
+        ctx.drawImage(sel, 0, 0)
+        return c
+      },
+      t.target
+    )
+  }
+
+  /**
+   * Fills the selected area with the current colour. On a mask, a light
+   * colour reveals the area and a dark one hides it.
+   */
+  fillSelection() {
+    const t = this.editTarget()
+    if (!t) return
+    const sel = this.selection
+    const onMask = t.target === "mask"
+    const hide = onMask && this.colorIsDark()
+    const hex = onMask ? "#ffffff" : hsvToHex(this.state.color)
+    if (!onMask) this.rememberColor()
+    this.replaceCanvas(
+      t.layer.id,
+      (src) => {
+        const paint = makeCanvas(src.width, src.height)
+        const p = ctxOf(paint)
+        p.fillStyle = hex
+        p.fillRect(0, 0, paint.width, paint.height)
+        if (sel) {
+          p.globalCompositeOperation = "destination-in"
+          p.drawImage(sel, 0, 0)
+        }
+        const c = cloneCanvas(src)
+        const ctx = ctxOf(c)
+        if (hide) ctx.globalCompositeOperation = "destination-out"
+        ctx.drawImage(paint, 0, 0)
+        ctx.globalCompositeOperation = "source-over"
+        return c
+      },
+      t.target
+    )
+  }
+
+  /** Lifts the selected pixels onto a new layer, leaving or removing them. */
+  selectionToLayer(cut: boolean) {
+    const layer = this.activeLayer()
+    if (!layer || layer.fx) {
+      this.notify("Select a paint layer — adjustment layers hold no pixels")
+      return
+    }
+    const sel = this.selection
+    if (!sel) {
+      if (!cut) this.duplicateLayer(layer.id)
+      return
+    }
+    this.structural(() => {
+      const piece = this.bakedPixels(layer)
+      const p = ctxOf(piece)
+      p.globalCompositeOperation = "destination-in"
+      p.drawImage(sel, 0, 0)
+      p.globalCompositeOperation = "source-over"
+      let layers = this.state.layers
+      if (cut) {
+        const rest = cloneCanvas(this.canvases.get(layer.id)!)
+        const r = ctxOf(rest)
+        r.globalCompositeOperation = "destination-out"
+        r.drawImage(sel, 0, 0)
+        r.globalCompositeOperation = "source-over"
+        this.canvases.set(layer.id, rest)
+        layers = layers.map((l) =>
+          l.id === layer.id ? { ...l, rev: nextRev() } : l
+        )
+      }
+      this.layerCounter -= 1
+      const made = this.makeLayer(`${layer.name} ${cut ? "cut" : "copy"}`)
+      this.canvases.set(made.id, piece)
+      const next = layers.slice()
+      next.splice(next.findIndex((l) => l.id === layer.id) + 1, 0, made)
+      this.setState({ layers: next, activeLayerId: made.id, editMask: false })
+    })
+  }
+
+  // ---- layer masks ---------------------------------------------------------
+
+  /**
+   * Gives a layer a mask. By default it reveals the selection if there is
+   * one, and the whole layer otherwise.
+   */
+  addMask(
+    id: string,
+    from: "auto" | "reveal" | "hide" | "selection" | "inverse" = "auto"
+  ) {
+    const meta = this.state.layers.find((l) => l.id === id)
+    if (!meta || meta.mask) return
+    const sel = this.selection
+    const kind = from === "auto" ? (sel ? "selection" : "reveal") : from
+    this.structural(() => {
+      let c: HTMLCanvasElement
+      if (kind === "hide") {
+        c = this.blank()
+      } else if (kind === "selection" && sel) {
+        c = cloneCanvas(sel)
+      } else {
+        c = this.full()
+        if (kind === "inverse" && sel) {
+          const ctx = ctxOf(c)
+          ctx.globalCompositeOperation = "destination-out"
+          ctx.drawImage(sel, 0, 0)
+          ctx.globalCompositeOperation = "source-over"
+        }
+      }
+      this.masks.set(id, c)
+      this.setState({
+        layers: this.state.layers.map((l) =>
+          l.id === id
+            ? { ...l, mask: true, maskOff: false, maskRev: nextRev() }
+            : l
+        ),
+        activeLayerId: id,
+        editMask: true,
+      })
+      // The selection has become the mask.
+      if (sel && (kind === "selection" || kind === "inverse")) {
+        this.putSelection(null)
+      }
+    })
+  }
+
+  removeMask(id: string) {
+    if (!this.masks.has(id)) return
+    this.structural(() => {
+      this.masks.delete(id)
+      this.setState({
+        layers: this.state.layers.map((l) =>
+          l.id === id ? { ...l, mask: false, maskOff: false } : l
+        ),
+        editMask: false,
+      })
+    })
+  }
+
+  /** Bakes the mask into the layer's pixels and removes it. */
+  applyMask(id: string) {
+    const meta = this.state.layers.find((l) => l.id === id)
+    if (!meta || !this.masks.has(id)) return
+    if (meta.fx) {
+      this.notify("An adjustment layer's mask can't be applied — merge it down instead")
+      return
+    }
+    this.structural(() => {
+      this.canvases.set(id, this.bakedPixels({ ...meta, maskOff: false }))
+      this.masks.delete(id)
+      this.setState({
+        layers: this.state.layers.map((l) =>
+          l.id === id
+            ? { ...l, mask: false, maskOff: false, rev: nextRev() }
+            : l
+        ),
+        editMask: false,
+      })
+    })
+  }
+
+  invertMask(id: string) {
+    this.replaceCanvas(
+      id,
+      (src) => {
+        const c = this.full()
+        const ctx = ctxOf(c)
+        ctx.globalCompositeOperation = "destination-out"
+        ctx.drawImage(src, 0, 0)
+        ctx.globalCompositeOperation = "source-over"
+        return c
+      },
+      "mask"
+    )
+  }
+
+  /** Loads a layer's mask as the selection. */
+  selectFromMask(id: string) {
+    const mask = this.masks.get(id)
+    if (mask) this.commitSelection(this.combine(cloneCanvas(mask), this.state.selMode))
+  }
+
+  setEditMask(on: boolean) {
+    this.finishSettle()
+    if (this.action) return
+    this.setState({ editMask: on })
+  }
+
+  // ---- keys ----------------------------------------------------------------
+
+  /** Escape: abandons a selection shape in progress. */
+  escape(): boolean {
+    if (this.poly) {
+      this.poly = null
+      this.requestRender()
+      return true
+    }
+    const k = this.action?.kind
+    if (k === "marquee" || k === "lasso" || k === "selbrush") {
+      this.cancelAction()
+      return true
+    }
+    return false
+  }
+
+  /** Backspace: steps the polygon back a point, else erases the selection. */
+  backspace() {
+    const p = this.poly
+    if (p) {
+      p.pts.length -= 2
+      if (p.pts.length === 0) this.poly = null
+      this.requestRender()
+    } else if (this.selection) {
+      this.clearSelection()
+    }
   }
 
   // ---- touch gestures ------------------------------------------------------
@@ -1634,10 +2802,16 @@ export class PaintEngine {
       this.notify("The active layer is hidden")
       return
     }
+    if (this.state.editMask && layer.mask) {
+      // On a mask the bucket simply reveals or hides the selected area.
+      this.fillSelection()
+      return
+    }
     if (layer.fx) {
       this.notify("Select a paint layer — adjustment layers hold no pixels")
       return
     }
+    const sel = this.selection
     const rgb = hexToRgb(hsvToHex(this.state.color))
     if (!rgb) return
     this.rememberColor()
@@ -1716,7 +2890,10 @@ export class PaintEngine {
       cctx.putImageData(img, 0, 0)
       const out = makeCanvas(w, h)
       ctxOf(out).drawImage(cpu, 0, 0)
-      return out
+      // Keep the fill inside the selection.
+      return sel
+        ? maskedBlend(makeCanvas(w, h), makeCanvas(w, h), src, out, sel)
+        : out
     })
   }
 
@@ -1763,6 +2940,23 @@ export class PaintEngine {
       if (!blob) continue
       blobs[meta.id] = blob
       this.blobCache.set(meta.id, { rev: meta.rev, blob })
+    }
+    for (const meta of s.layers) {
+      const mask = meta.mask ? this.masks.get(meta.id) : undefined
+      if (!mask) continue
+      const key = `${meta.id}#mask`
+      const rev = meta.maskRev ?? 0
+      const cached = this.blobCache.get(key)
+      if (cached && cached.rev === rev) {
+        blobs[key] = cached.blob
+        continue
+      }
+      const blob = await new Promise<Blob | null>((resolve) =>
+        mask.toBlob(resolve, "image/png")
+      )
+      if (!blob) continue
+      blobs[key] = blob
+      this.blobCache.set(key, { rev, blob })
     }
     for (const id of [...this.blobCache.keys()]) {
       if (!(id in blobs)) this.blobCache.delete(id)

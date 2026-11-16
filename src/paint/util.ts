@@ -28,6 +28,39 @@ export function cropCanvas(src: HTMLCanvasElement, r: Rect): HTMLCanvasElement {
   return c
 }
 
+/**
+ * Writes before·(1−mask) + after·mask into `out`, using `tmp` as working
+ * space. All four canvases are the same size; `mask` is a larger coverage
+ * canvas whose (mx, my) lines up with their origin.
+ */
+export function maskedBlend(
+  out: HTMLCanvasElement,
+  tmp: HTMLCanvasElement,
+  before: CanvasImageSource,
+  after: CanvasImageSource,
+  mask: CanvasImageSource,
+  mx = 0,
+  my = 0
+): HTMLCanvasElement {
+  const o = ctxOf(out)
+  const t = ctxOf(tmp)
+  o.globalAlpha = 1
+  o.globalCompositeOperation = "copy"
+  o.drawImage(after, 0, 0)
+  o.globalCompositeOperation = "destination-in"
+  o.drawImage(mask, -mx, -my)
+  t.globalAlpha = 1
+  t.globalCompositeOperation = "copy"
+  t.drawImage(before, 0, 0)
+  t.globalCompositeOperation = "destination-out"
+  t.drawImage(mask, -mx, -my)
+  o.globalCompositeOperation = "lighter"
+  o.drawImage(tmp, 0, 0)
+  o.globalCompositeOperation = "source-over"
+  t.globalCompositeOperation = "source-over"
+  return out
+}
+
 export const clamp = (v: number, lo: number, hi: number) =>
   v < lo ? lo : v > hi ? hi : v
 

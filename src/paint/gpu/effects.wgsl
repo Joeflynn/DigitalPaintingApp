@@ -163,6 +163,10 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       let ink = 1.0 - smoothstep(radius - 0.7, radius + 0.7, distance(rp, centre));
       c = vec3f(1.0 - ink);
     }
+    case 15 { // mask remap: threshold the blurred coverage
+      r = vec4f(smoothstep(u.a.x, u.a.y, soft.a));
+      spatial = true;
+    }
     default {}
   }
 

@@ -1,9 +1,37 @@
 import type * as React from "react"
+import { useEffect } from "react"
 
 import { cn } from "@/lib/utils"
 
 export const panelClass =
   "rounded-2xl border border-white/8 bg-card/95 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.7)] backdrop-blur-md"
+
+/**
+ * Closes a popover on Escape or a press anywhere outside it. Mark the
+ * popover and the control that toggles it with `data-popover` so presses on
+ * those are left alone.
+ */
+export function useDismiss(open: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!open) return
+    const down = (e: PointerEvent) => {
+      const t = e.target
+      if (t instanceof Element && t.closest("[data-popover]")) return
+      // Swallow the press so dismissing a menu doesn't also paint a dab.
+      e.stopPropagation()
+      onClose()
+    }
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    document.addEventListener("pointerdown", down, true)
+    document.addEventListener("keydown", key)
+    return () => {
+      document.removeEventListener("pointerdown", down, true)
+      document.removeEventListener("keydown", key)
+    }
+  }, [open, onClose])
+}
 
 export function IconButton({
   label,

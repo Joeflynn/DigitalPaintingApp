@@ -4,6 +4,10 @@ import {
   ArrowLineDownIcon,
   CaretDownIcon,
   CaretUpIcon,
+  CheckIcon,
+  CircleHalfIcon,
+  SelectionIcon,
+  SwapIcon,
   CopyIcon,
   EyeIcon,
   EyeSlashIcon,
@@ -15,7 +19,7 @@ import {
 } from "@phosphor-icons/react"
 import { useEffect, useRef, useState } from "react"
 
-import { IconButton, Slider, panelClass } from "@/components/paint/controls"
+import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import {
@@ -54,6 +58,110 @@ function LayerThumb({ layer, aspect }: { layer: LayerMeta; aspect: number }) {
       className="shrink-0 rounded-md border border-white/10"
       style={{ width: w, height: h, background: checker }}
     />
+  )
+}
+
+/** The layer's mask in greyscale: white shows the layer, black hides it. */
+function MaskThumb({ layer, aspect }: { layer: LayerMeta; aspect: number }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  const w = 34
+  const h = Math.max(20, Math.min(36, Math.round(w / aspect)))
+
+  useEffect(() => {
+    const c = ref.current
+    const src = engine.getMaskCanvas(layer.id)
+    if (!c || !src) return
+    const ctx = c.getContext("2d")!
+    ctx.fillStyle = "#000"
+    ctx.fillRect(0, 0, c.width, c.height)
+    ctx.imageSmoothingQuality = "high"
+    ctx.drawImage(src, 0, 0, c.width, c.height)
+  }, [layer.id, layer.maskRev, h])
+
+  return (
+    <canvas
+      ref={ref}
+      width={w * 2}
+      height={h * 2}
+      className={cn("block rounded-[5px]", layer.maskOff && "opacity-30")}
+      style={{ width: w, height: h }}
+    />
+  )
+}
+
+/** Wraps a thumbnail so clicking it chooses what painting edits. */
+function EditTarget({
+  label,
+  selected,
+  onPick,
+  children,
+}: {
+  label: string
+  selected: boolean
+  onPick: (e: React.MouseEvent) => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={selected}
+      onClick={(e) => {
+        e.stopPropagation()
+        onPick(e)
+      }}
+      className={cn(
+        "shrink-0 rounded-md border border-white/10 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        selected && "border-white ring-1 ring-white"
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+function MaskControls({ layer }: { layer: LayerMeta }) {
+  const id = layer.id
+  return (
+    <div className="flex items-center gap-0.5 border-t border-white/8 px-2 pt-1.5 pb-2">
+      <span className="mr-auto text-[10px] text-muted-foreground uppercase">Mask</span>
+      <IconButton label="Invert mask" className="size-7" onClick={() => engine.invertMask(id)}>
+        <SwapIcon />
+      </IconButton>
+      <IconButton
+        label={layer.maskOff ? "Enable mask" : "Disable mask (Shift-click its thumbnail)"}
+        className="size-7"
+        onClick={() => engine.setLayerProps(id, { maskOff: !layer.maskOff })}
+      >
+        {layer.maskOff ? <EyeSlashIcon className="opacity-50" /> : <EyeIcon />}
+      </IconButton>
+      <IconButton label="Load mask as selection" className="size-7" onClick={() => engine.selectFromMask(id)}>
+        <SelectionIcon />
+      </IconButton>
+      {!layer.fx && (
+        <IconButton label="Apply mask to the layer's pixels" className="size-7" onClick={() => engine.applyMask(id)}>
+          <CheckIcon />
+        </IconButton>
+      )}
+      <IconButton label="Delete mask" className="size-7" onClick={() => engine.removeMask(id)}>
+        <TrashIcon />
+      </IconButton>
+    </div>
+  )
+}
+
+function AddMaskButton({ layer }: { layer: LayerMeta }) {
+  const { hasSelection } = useEngine()
+  if (layer.mask) return null
+  return (
+    <IconButton
+      label={hasSelection ? "Add mask from selection" : "Add layer mask"}
+      className="size-7"
+      onClick={() => engine.addMask(layer.id)}
+    >
+      <CircleHalfIcon />
+    </IconButton>
   )
 }
 
@@ -115,6 +223,7 @@ function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
         >
           <ArrowCounterClockwiseIcon />
         </IconButton>
+        <AddMaskButton layer={layer} />
         <IconButton
           label="Clipping mask — affect only the layer below"
           className="size-7"
@@ -159,11 +268,14 @@ function LayerRow({
   layer,
   active,
   aspect,
+  editMask,
 }: {
   layer: LayerMeta
   active: boolean
   aspect: number
+  editMask: boolean
 }) {
+  const onMask = active && editMask && !!layer.mask
   const [editing, setEditing] = useState(false)
   const blend = BLEND_MODES.find((b) => b.id === layer.blend)
   const fxDef = layer.fx ? getEffect(layer.fx.type) : undefined
@@ -189,7 +301,38 @@ function LayerRow({
         {layer.clip && (
           <ArrowElbowDownRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
         )}
-        {layer.fx ? <FxThumb /> : <LayerThumb layer={layer} aspect={aspect} />}
+        {layer.mask ? (
+          <>
+            <EditTarget
+              label={layer.fx ? "Adjustment" : "Paint on the layer"}
+              selected={active && !onMask}
+              onPick={() => {
+                engine.setActiveLayer(layer.id)
+                engine.setEditMask(false)
+              }}
+            >
+              {layer.fx ? <FxThumb /> : <LayerThumb layer={layer} aspect={aspect} />}
+            </EditTarget>
+            <EditTarget
+              label="Paint on the mask (Shift-click to disable it)"
+              selected={onMask}
+              onPick={(e) => {
+                if (e.shiftKey) {
+                  engine.setLayerProps(layer.id, { maskOff: !layer.maskOff })
+                  return
+                }
+                engine.setActiveLayer(layer.id)
+                engine.setEditMask(true)
+              }}
+            >
+              <MaskThumb layer={layer} aspect={aspect} />
+            </EditTarget>
+          </>
+        ) : layer.fx ? (
+          <FxThumb />
+        ) : (
+          <LayerThumb layer={layer} aspect={aspect} />
+        )}
         <div className="min-w-0 flex-1">
           {editing ? (
             <input
@@ -218,7 +361,7 @@ function LayerRow({
             </div>
           )}
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-            <span>{layer.fx ? "Adjustment" : (blend?.label ?? "Normal")}</span>
+            <span>{onMask ? "Editing mask" : layer.fx ? "Adjustment" : (blend?.label ?? "Normal")}</span>
             <span>·</span>
             <span className="tabular-nums">{Math.round(layer.opacity * 100)}%</span>
             {layer.alphaLock && <LockSimpleIcon className="size-3" weight="fill" />}
@@ -282,9 +425,17 @@ function LayerRow({
             >
               <ArrowElbowDownRightIcon />
             </IconButton>
+            <AddMaskButton layer={layer} />
           </div>
         </div>
       )}
+
+      {onMask && (
+        <p className="px-2 pb-1.5 text-[10px] leading-snug text-muted-foreground">
+          Painting the mask: dark colours hide the layer, light colours reveal it.
+        </p>
+      )}
+      {active && layer.mask && <MaskControls layer={layer} />}
     </div>
   )
 }
@@ -295,13 +446,13 @@ export function LayersPanel() {
   const idx = s.layers.findIndex((l) => l.id === id)
   const aspect = s.docW / s.docH
   const [fxMenu, setFxMenu] = useState(false)
+  useDismiss(fxMenu, () => setFxMenu(false))
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {fxMenu && (
         <>
-          <div className="fixed inset-0 z-40" onPointerDown={() => setFxMenu(false)} />
-          <div className={cn(panelClass, "absolute inset-x-0 bottom-full z-50 mb-2 p-2")}>
+          <div data-popover className={cn(panelClass, "absolute inset-x-0 bottom-full z-50 mb-2 p-2")}>
             <AddEffectMenu
               onPick={(type) => {
                 engine.addAdjustment(type)
@@ -330,7 +481,7 @@ export function LayersPanel() {
         <IconButton label="Delete layer" className="size-7" onClick={() => engine.deleteLayer(id)}>
           <TrashIcon />
         </IconButton>
-        <IconButton label="Add effect or adjustment layer" className="size-7" active={fxMenu} onClick={() => setFxMenu(!fxMenu)}>
+        <IconButton label="Add effect or adjustment layer" data-popover className="size-7" active={fxMenu} onClick={() => setFxMenu(!fxMenu)}>
           <SlidersHorizontalIcon />
         </IconButton>
         <IconButton label="New layer" className="size-7 bg-white/10 text-foreground" onClick={() => engine.addLayer()}>
@@ -340,7 +491,7 @@ export function LayersPanel() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 [scrollbar-width:thin]">
         {[...s.layers].reverse().map((l) => (
-          <LayerRow key={l.id} layer={l} active={l.id === id} aspect={aspect} />
+          <LayerRow key={l.id} layer={l} active={l.id === id} aspect={aspect} editMask={s.editMask} />
         ))}
       </div>
 

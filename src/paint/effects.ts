@@ -198,9 +198,28 @@ export const EFFECTS: EffectDef[] = [
   },
 ]
 
+/**
+ * Internal: blurs a mask and pushes its coverage through a threshold. Used
+ * to grow, shrink and smooth selections; never offered as a layer effect.
+ */
+export const MASK_REMAP: EffectDef = {
+  id: "mask-remap",
+  code: 15,
+  label: "Mask remap",
+  group: "Filters",
+  hint: "",
+  params: [
+    { key: "lo", label: "Low", min: 0, max: 1, value: 0.45, display: "number" },
+    { key: "hi", label: "High", min: 0, max: 1, value: 0.55, display: "number" },
+    { key: "sigma", label: "Sigma", min: 0, max: 200, value: 1, display: "px" },
+  ],
+  blur: (p) => p.sigma,
+}
+
 export const EFFECT_GROUPS: EffectGroup[] = ["Adjustments", "Filters", "Effects"]
 
 export function getEffect(id: string): EffectDef | undefined {
+  if (id === MASK_REMAP.id) return MASK_REMAP
   return EFFECTS.find((e) => e.id === id)
 }
 

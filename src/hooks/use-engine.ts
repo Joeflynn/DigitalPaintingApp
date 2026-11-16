@@ -34,7 +34,34 @@ export function useShortcuts(togglePanels: () => void) {
         } else if (key === "0") {
           e.preventDefault()
           engine.fit()
+        } else if (key === "a") {
+          e.preventDefault()
+          engine.selectAll()
+        } else if (key === "d") {
+          e.preventDefault()
+          if (e.shiftKey) engine.reselect()
+          else engine.deselect()
+        } else if (key === "i" && e.shiftKey) {
+          e.preventDefault()
+          engine.invertSelection()
+        } else if (key === "j") {
+          e.preventDefault()
+          engine.selectionToLayer(e.shiftKey)
         }
+        return
+      }
+
+      if (e.key === "Escape") {
+        if (engine.escape()) e.preventDefault()
+        return
+      }
+      if (e.key === "Enter") {
+        engine.closePolygon()
+        return
+      }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault()
+        engine.backspace()
         return
       }
 
@@ -72,6 +99,21 @@ export function useShortcuts(togglePanels: () => void) {
           break
         case "h":
           engine.setTool("hand")
+          break
+        case "a":
+          engine.setTool("select-rect")
+          break
+        case "l":
+          engine.setTool("select-lasso")
+          break
+        case "p":
+          engine.setTool("select-poly")
+          break
+        case "q":
+          engine.setTool("select-brush")
+          break
+        case "w":
+          engine.setTool("select-wand")
           break
         case "r":
           engine.setRotateKey(true)
