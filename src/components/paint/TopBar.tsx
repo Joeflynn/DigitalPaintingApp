@@ -3,6 +3,8 @@ import {
   ArrowCounterClockwiseIcon,
   ArrowsInSimpleIcon,
   CaretDownIcon,
+  CheckIcon,
+  LayoutIcon,
   IntersectIcon,
   SelectionAllIcon,
   SelectionIcon,
@@ -24,6 +26,7 @@ import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 
 import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
+import { layout, useLayout, type ViewItem } from "@/components/paint/layout"
 import { SELECT_TOOL_INFO } from "@/components/paint/select-tools"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
@@ -308,21 +311,28 @@ function MenuItem({
   onClick,
   disabled,
   keys,
+  checked,
   children,
 }: {
   onClick: () => void
   disabled?: boolean
   keys?: string
+  /** Makes this a checkable item, ticked when true. */
+  checked?: boolean
   children: ReactNode
 }) {
   return (
     <button
       type="button"
-      role="menuitem"
+      role={checked === undefined ? "menuitem" : "menuitemcheckbox"}
+      aria-checked={checked}
       disabled={disabled}
       onClick={onClick}
       className="flex h-7 w-full items-center gap-3 rounded-lg px-2 text-left text-xs text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-35"
     >
+      {checked !== undefined && (
+        <CheckIcon weight="bold" className={cn("size-3.5 shrink-0", !checked && "invisible")} />
+      )}
       <span className="flex-1 truncate">{children}</span>
       {keys && <span className="font-mono text-[10px] text-muted-foreground">{keys}</span>}
     </button>
@@ -386,6 +396,88 @@ function SelectMenu({ onDone }: { onDone: () => void }) {
       </MenuItem>
       <MenuItem disabled={!has || !layer || !!layer.mask} onClick={run(() => engine.addMask(s.activeLayerId, "inverse"))}>
         Mask out selection
+      </MenuItem>
+    </div>
+  )
+}
+
+const VIEW_PANELS: [ViewItem, string][] = [
+  ["tools", "Tools"],
+  ["color", "Colour"],
+  ["options", "Brushes & tool options"],
+  ["layers", "Layers"],
+]
+
+const VIEW_CONTROLS: [ViewItem, string][] = [
+  ["context", "Tool settings bar"],
+  ["viewControls", "Zoom & rotation controls"],
+]
+
+function ViewMenu({
+  panelsOpen,
+  onTogglePanels,
+  onShowPanels,
+  onDone,
+}: {
+  panelsOpen: boolean
+  onTogglePanels: () => void
+  onShowPanels: () => void
+  onDone: () => void
+}) {
+  const s = useEngine()
+  const { hidden } = useLayout()
+  const heading = "px-2 pt-2 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase"
+  const run = (fn: () => void) => () => {
+    fn()
+    onDone()
+  }
+  return (
+    <div role="menu" className="flex w-60 flex-col">
+      <div className={cn(heading, "pt-1")}>Panels</div>
+      {VIEW_PANELS.map(([id, text]) => (
+        <MenuItem
+          key={id}
+          checked={panelsOpen && !hidden[id]}
+          onClick={() => {
+            // Ticking a panel while everything is tucked away brings them back.
+            if (!panelsOpen) {
+              onShowPanels()
+              if (!hidden[id]) return
+            }
+            layout.toggle(id)
+          }}
+        >
+          {text}
+        </MenuItem>
+      ))}
+      <MenuItem keys="Tab" onClick={run(onTogglePanels)}>
+        {panelsOpen ? "Hide all panels" : "Show panels"}
+      </MenuItem>
+
+      <div className={heading}>Controls</div>
+      {VIEW_CONTROLS.map(([id, text]) => (
+        <MenuItem key={id} checked={!hidden[id]} onClick={() => layout.toggle(id)}>
+          {text}
+        </MenuItem>
+      ))}
+
+      <div className={heading}>Layout</div>
+      <MenuItem
+        onClick={run(() => {
+          layout.reset()
+          onShowPanels()
+        })}
+      >
+        Reset panel layout
+      </MenuItem>
+
+      <div className={heading}>Canvas</div>
+      <MenuItem keys="+" onClick={() => engine.zoomBy(1.25)}>Zoom in</MenuItem>
+      <MenuItem keys="−" onClick={() => engine.zoomBy(0.8)}>Zoom out</MenuItem>
+      <MenuItem onClick={run(() => engine.zoomBy(1 / s.zoom))}>Actual size (100%)</MenuItem>
+      <MenuItem keys="F" onClick={run(() => engine.fit())}>Fit canvas</MenuItem>
+      <MenuItem disabled={s.rotation === 0} onClick={run(() => engine.resetRotation())}>
+        Reset rotation
       </MenuItem>
     </div>
   )
@@ -496,13 +588,16 @@ function ContextBar() {
 export function TopBar({
   panelsOpen,
   onTogglePanels,
+  onShowPanels,
 }: {
   panelsOpen: boolean
   onTogglePanels: () => void
+  onShowPanels: () => void
 }) {
   const s = useEngine()
+  const { hidden } = useLayout()
   const fileRef = useRef<HTMLInputElement>(null)
-  const [menu, setMenu] = useState<"new" | "keys" | "select" | null>(null)
+  const [menu, setMenu] = useState<"new" | "keys" | "select" | "view" | null>(null)
   const degrees = Math.round((((s.rotation * 180) / Math.PI) % 360 + 540) % 360 - 180)
 
   const exportPng = async () => {
@@ -570,6 +665,22 @@ export function TopBar({
           <span className="hidden sm:inline">Select</span>
           <CaretDownIcon className="!size-3 opacity-60" />
         </button>
+        <button
+          type="button"
+          title="View menu"
+          data-popover
+          aria-haspopup="menu"
+          aria-expanded={menu === "view"}
+          onClick={() => setMenu(menu === "view" ? null : "view")}
+          className={cn(
+            "flex h-9 items-center gap-1 rounded-xl px-2 text-xs text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-[18px]",
+            menu === "view" && "bg-white/8 text-foreground"
+          )}
+        >
+          <LayoutIcon />
+          <span className="hidden sm:inline">View</span>
+          <CaretDownIcon className="!size-3 opacity-60" />
+        </button>
         <input
           ref={fileRef}
           type="file"
@@ -586,47 +697,61 @@ export function TopBar({
         <Popover open={menu === "select"} onClose={() => setMenu(null)} className="right-0 !p-1.5">
           <SelectMenu onDone={() => setMenu(null)} />
         </Popover>
+        <Popover open={menu === "view"} onClose={() => setMenu(null)} className="right-0 !p-1.5">
+          <ViewMenu
+            panelsOpen={panelsOpen}
+            onTogglePanels={onTogglePanels}
+            onShowPanels={onShowPanels}
+            onDone={() => setMenu(null)}
+          />
+        </Popover>
       </div>
 
-      <div className={cn(panelClass, "pointer-events-auto hidden h-12 items-center gap-2 px-3.5 md:flex")}>
-        <ContextBar />
-      </div>
+      {!hidden.context && (
+        <div className={cn(panelClass, "pointer-events-auto hidden h-12 items-center gap-2 px-3.5 md:flex")}>
+          <ContextBar />
+        </div>
+      )}
 
       <div className={cn(panelClass, "pointer-events-auto relative flex h-12 items-center gap-0.5 px-2")}>
-        <IconButton label="Symmetry (M)" active={s.symmetry} onClick={() => engine.setSymmetry(!s.symmetry)}>
-          <SplitHorizontalIcon />
-        </IconButton>
-        <button
-          type="button"
-          title="Reset canvas rotation"
-          onClick={() => engine.resetRotation()}
-          className={cn(
-            "flex h-9 items-center gap-1 rounded-xl px-2 text-[11px] text-muted-foreground tabular-nums outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-            degrees !== 0 && "text-foreground"
-          )}
-        >
-          <CompassIcon className="size-[18px]" />
-          {degrees}°
-        </button>
-        <Divider />
-        <IconButton label="Zoom out (−)" onClick={() => engine.zoomBy(0.8)}>
-          <MinusIcon />
-        </IconButton>
-        <button
-          type="button"
-          title="Zoom to 100%"
-          onClick={() => engine.zoomBy(1 / s.zoom)}
-          className="h-9 w-12 rounded-xl text-center text-[11px] text-foreground tabular-nums outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {Math.round(s.zoom * 100)}%
-        </button>
-        <IconButton label="Zoom in (+)" onClick={() => engine.zoomBy(1.25)}>
-          <PlusIcon />
-        </IconButton>
-        <IconButton label="Fit canvas (F)" onClick={() => engine.fit()}>
-          <ArrowsInSimpleIcon />
-        </IconButton>
-        <Divider />
+        {!hidden.viewControls && (
+          <>
+            <IconButton label="Symmetry (M)" active={s.symmetry} onClick={() => engine.setSymmetry(!s.symmetry)}>
+              <SplitHorizontalIcon />
+            </IconButton>
+            <button
+              type="button"
+              title="Reset canvas rotation"
+              onClick={() => engine.resetRotation()}
+              className={cn(
+                "flex h-9 items-center gap-1 rounded-xl px-2 text-[11px] text-muted-foreground tabular-nums outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+                degrees !== 0 && "text-foreground"
+              )}
+            >
+              <CompassIcon className="size-[18px]" />
+              {degrees}°
+            </button>
+            <Divider />
+            <IconButton label="Zoom out (−)" onClick={() => engine.zoomBy(0.8)}>
+              <MinusIcon />
+            </IconButton>
+            <button
+              type="button"
+              title="Zoom to 100%"
+              onClick={() => engine.zoomBy(1 / s.zoom)}
+              className="h-9 w-12 rounded-xl text-center text-[11px] text-foreground tabular-nums outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {Math.round(s.zoom * 100)}%
+            </button>
+            <IconButton label="Zoom in (+)" onClick={() => engine.zoomBy(1.25)}>
+              <PlusIcon />
+            </IconButton>
+            <IconButton label="Fit canvas (F)" onClick={() => engine.fit()}>
+              <ArrowsInSimpleIcon />
+            </IconButton>
+            <Divider />
+          </>
+        )}
         <IconButton label="Keyboard shortcuts" data-popover active={menu === "keys"} onClick={() => setMenu(menu === "keys" ? null : "keys")}>
           <KeyboardIcon />
         </IconButton>

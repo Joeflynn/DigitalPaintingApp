@@ -6,6 +6,7 @@ import { CanvasView } from "@/components/paint/CanvasView"
 import { ColorPanel } from "@/components/paint/ColorPanel"
 import { DistortPanel } from "@/components/paint/DistortPanel"
 import { panelClass } from "@/components/paint/controls"
+import { PanelFrame, SnapGuides, measureInsets, useLayout } from "@/components/paint/layout"
 import { LayersPanel } from "@/components/paint/LayersPanel"
 import { ToolRail } from "@/components/paint/ToolRail"
 import { TopBar } from "@/components/paint/TopBar"
@@ -41,6 +42,7 @@ function Toast() {
 export function App() {
   const [panelsOpen, setPanelsOpen] = useState(true)
   const togglePanels = useCallback(() => setPanelsOpen((v) => !v), [])
+  const showPanels = useCallback(() => setPanelsOpen(true), [])
   const [studio, setStudio] = useState(false)
   const closeStudio = useCallback(() => setStudio(false), [])
   const state = useEngine()
@@ -48,39 +50,52 @@ export function App() {
   const vector = tool === "shape" || tool === "text" || !!selectedObject(state)
   useShortcuts(togglePanels)
 
+  const lay = useLayout()
+  const { hidden } = lay
+
+  // Keep "fit" centred in the space the edge-docked panels leave free.
   useEffect(() => {
-    engine.setInsets(panelsOpen ? 76 : 0, panelsOpen ? 316 : 0)
-  }, [panelsOpen])
+    engine.setInsets(...measureInsets())
+  }, [panelsOpen, lay])
 
   return (
     <div className="relative h-svh w-screen overflow-hidden bg-[radial-gradient(ellipse_at_center,oklch(0.24_0.008_107),oklch(0.15_0.006_107))] text-foreground select-none">
       <CanvasView />
-      <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} />
+      <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} />
 
       {panelsOpen && (
         <>
-          <ToolRail className="absolute top-[4.75rem] left-3 z-20" />
-          <aside className="absolute top-[4.75rem] right-3 bottom-3 z-20 flex w-[292px] flex-col gap-2">
-            <section className={cn(panelClass, "shrink-0")} aria-label="Colour">
+          {!hidden.tools && (
+            <PanelFrame id="tools" label="Tools" bare resizable={false}>
+              <ToolRail />
+            </PanelFrame>
+          )}
+          {!hidden.color && (
+            <PanelFrame id="color" label="Colour" minW={200} minH={230}>
               <ColorPanel />
-            </section>
-            {tool === "distort" ? (
-              <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Distort">
+            </PanelFrame>
+          )}
+          {!hidden.options && (
+            <PanelFrame
+              id="options"
+              label={tool === "distort" ? "Distort" : vector ? "Object" : "Brushes"}
+              minW={260}
+            >
+              {tool === "distort" ? (
                 <DistortPanel />
-              </section>
-            ) : vector ? (
-              <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Object">
+              ) : vector ? (
                 <VectorPanel />
-              </section>
-            ) : (
-              <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Brushes">
+              ) : (
                 <BrushPanel onOpenStudio={() => setStudio(true)} />
-              </section>
-            )}
-            <section className={cn(panelClass, "flex min-h-36 flex-[1.15] flex-col")} aria-label="Layers">
+              )}
+            </PanelFrame>
+          )}
+          {!hidden.layers && (
+            <PanelFrame id="layers" label="Layers" minW={260}>
               <LayersPanel />
-            </section>
-          </aside>
+            </PanelFrame>
+          )}
+          <SnapGuides />
         </>
       )}
       {studio && (

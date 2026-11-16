@@ -63,7 +63,7 @@ function SelectButton() {
           <div
             role="menu"
             data-popover
-            className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5")}
+            className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5 group-data-[side=r]/panel:right-full group-data-[side=r]/panel:left-auto group-data-[side=r]/panel:mr-3 group-data-[side=r]/panel:ml-0")}
           >
             {SELECT_TOOL_INFO.map((t) => (
               <IconButton
@@ -113,7 +113,7 @@ function ShapeButton() {
         <div
           role="menu"
           data-popover
-          className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5")}
+          className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5 group-data-[side=r]/panel:right-full group-data-[side=r]/panel:left-auto group-data-[side=r]/panel:mr-3 group-data-[side=r]/panel:ml-0")}
         >
           {SHAPE_KINDS.map((k) => (
             <IconButton

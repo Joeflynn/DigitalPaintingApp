@@ -526,7 +526,7 @@ export function LayersPanel() {
     <div className="relative flex min-h-0 flex-1 flex-col">
       {fxMenu && (
         <>
-          <div data-popover className={cn(panelClass, "absolute inset-x-0 bottom-full z-50 mb-2 p-2")}>
+          <div data-popover className={cn(panelClass, "absolute inset-x-0 bottom-full z-50 mb-2 p-2 group-data-[tight]/panel:top-10 group-data-[tight]/panel:bottom-auto group-data-[tight]/panel:mb-0")}>
             <AddEffectMenu
               onPick={(type) => {
                 engine.addAdjustment(type)

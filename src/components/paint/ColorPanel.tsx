@@ -44,11 +44,11 @@ export function ColorPanel() {
   }
 
   return (
-    <div className="flex flex-col gap-2.5 p-3">
+    <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-hidden p-3 [&>*:not(:first-child)]:shrink-0">
       <div
         role="application"
         aria-label="Saturation and brightness"
-        className="relative h-36 cursor-crosshair touch-none overflow-hidden rounded-xl"
+        className="relative min-h-16 flex-1 cursor-crosshair touch-none overflow-hidden rounded-xl"
         style={{
           background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${color.h} 100% 50%))`,
         }}
