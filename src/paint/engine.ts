@@ -5,6 +5,16 @@ import {
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
 } from "./brushes"
+import {
+  DistortRenderer,
+  liquifyDab,
+  makeSession,
+  nearestControl,
+  updateMesh,
+  type DistortMode,
+  type DistortSession,
+  type LiquifyTool,
+} from "./distort"
 import { defaultFx, getEffect, type LayerFx } from "./effects"
 import { GPUAnts } from "./gpu-ants"
 import { GPUEffects } from "./gpu-effects"
@@ -147,6 +157,7 @@ export type ToolId =
   | "eyedropper"
   | "shape"
   | "text"
+  | "distort"
   | "move"
   | "hand"
 
@@ -213,6 +224,18 @@ export interface EngineState extends SelectOptions {
   /** Style given to new shapes, and to new text. */
   shapeStyle: ShapeStyle
   textStyle: TextStyle
+  distortMode: DistortMode
+  /** Warp: control cells per side (1 = just the four corners). */
+  warpGrid: number
+  liqTool: LiquifyTool
+  liqSize: number
+  liqStrength: number
+  /** Show the mesh over the layer while distorting. */
+  distortGrid: boolean
+  /** The active layer is set up to be distorted. */
+  distortActive: boolean
+  /** The distortion has changes that are not yet applied. */
+  distortDirty: boolean
 }
 
 interface UndoEntry {
@@ -295,6 +318,15 @@ type Action =
       /** Releasing without dragging starts editing this text. */
       edit: boolean
     }
+  | {
+      kind: "distort"
+      pointerId: number
+      /** The control point being dragged, and its offset from the pointer. */
+      idx: number
+      ox: number
+      oy: number
+    }
+  | { kind: "liquify"; pointerId: number; lx: number; ly: number }
 
 interface Gesture {
   cx: number
@@ -370,6 +402,14 @@ export class PaintEngine {
     vecPaint: "fill",
     shapeStyle: DEFAULT_SHAPE_STYLE,
     textStyle: DEFAULT_TEXT_STYLE,
+    distortMode: "warp",
+    warpGrid: 3,
+    liqTool: "push",
+    liqSize: 260,
+    liqStrength: 0.6,
+    distortGrid: true,
+    distortActive: false,
+    distortDirty: false,
   }
 
   private listeners = new Set<() => void>()
@@ -436,6 +476,17 @@ export class PaintEngine {
   } | null = null
   private textEl: HTMLTextAreaElement | null = null
   private lastVecDown = { id: "", t: 0 }
+  /** The distortion in progress on a layer, and its live result. */
+  private distort:
+    | (DistortSession & {
+        layerId: string
+        out: HTMLCanvasElement | null
+        outMask: HTMLCanvasElement | null
+        /** The layer has been handed to the renderer. */
+        uploaded: boolean
+      })
+    | null = null
+  private distortGL: DistortRenderer | null = null
   private fontsAsked = new Set<string>()
 
   private display: HTMLCanvasElement | null = null
@@ -568,6 +619,7 @@ export class PaintEngine {
     })
     this.syncVector()
     this.fit()
+    if (this.state.tool === "distort") this.beginDistort(true)
   }
 
   private allocate(w: number, h: number) {
@@ -597,6 +649,7 @@ export class PaintEngine {
   newDocument(w: number, h: number, background = "#f6f3ec") {
     this.cancelAction()
     this.commitText()
+    this.distort = null
     this.allocate(w, h)
     this.canvases.clear()
     this.masks.clear()
@@ -624,6 +677,7 @@ export class PaintEngine {
       vecSel: null,
     })
     this.fit()
+    if (this.state.tool === "distort") this.beginDistort(true)
     this.scheduleSave()
   }
 
@@ -678,6 +732,7 @@ export class PaintEngine {
   undo() {
     this.finishSettle()
     this.commitText()
+    this.applyDistort()
     if (this.action) return
     const e = this.undoStack.pop()
     if (!e) return
@@ -689,6 +744,7 @@ export class PaintEngine {
   redo() {
     this.finishSettle()
     this.commitText()
+    this.applyDistort()
     if (this.action) return
     const e = this.redoStack.pop()
     if (!e) return
@@ -702,6 +758,7 @@ export class PaintEngine {
       canUndo: this.undoStack.length > 0,
       canRedo: this.redoStack.length > 0,
     })
+    if (this.state.tool === "distort") this.beginDistort(true)
     this.requestRender()
     this.scheduleSave()
   }
@@ -724,6 +781,7 @@ export class PaintEngine {
     this.selection = s.selection
     this.selRev++
     this.textEdit = null
+    this.distort = null
     const active = s.layers.find((l) => l.id === s.activeLayerId)
     const sel = this.state.vecSel
     this.setState({
@@ -741,9 +799,12 @@ export class PaintEngine {
   private structural(fn: () => void) {
     this.cancelAction()
     this.commitText()
+    this.applyDistort()
+    this.distort = null
     const before = this.snap()
     fn()
     this.syncVector()
+    if (this.state.tool === "distort") this.beginDistort(true)
     const after = this.snap()
     this.pushUndo({
       undo: () => this.restore(before),
@@ -776,7 +837,9 @@ export class PaintEngine {
       this.setState({ editMask: false })
       return
     }
+    this.applyDistort()
     this.setState({ activeLayerId: id, editMask: false, vecSel: null })
+    if (this.state.tool === "distort") this.beginDistort()
     this.requestRender()
   }
 
@@ -1103,6 +1166,13 @@ export class PaintEngine {
   setTool(tool: ToolId) {
     this.commitText()
     if (this.poly) this.poly = null
+    if (tool !== "distort" && this.state.tool === "distort") {
+      // Leaving the tool keeps the distortion.
+      this.applyDistort()
+      this.distort = null
+      this.setState({ distortActive: false })
+    }
+    const entering = tool === "distort" && this.state.tool !== "distort"
     this.setState({
       tool,
       ...(isSelectTool(tool) ? { selectTool: tool } : null),
@@ -1110,6 +1180,7 @@ export class PaintEngine {
       ...(tool === "move" ? null : { vecSel: null }),
     })
     this.styleFromColor()
+    if (entering) this.beginDistort()
     this.requestRender()
     this.updateCursor()
   }
@@ -1159,6 +1230,11 @@ export class PaintEngine {
       this.setSelectOptions({
         selBrushSize: size + dir * Math.max(1, Math.round(size * 0.12)),
       })
+      return
+    }
+    if (this.state.tool === "distort") {
+      const size = this.state.liqSize
+      this.setDistortOptions({ liqSize: size + dir * Math.max(2, size * 0.12) })
       return
     }
     const tool = this.settingsTool()
@@ -1394,6 +1470,10 @@ export class PaintEngine {
     if (this.isLive(m, "mask")) {
       return { src: this.liveCanvas(src), ox: 0, oy: 0 }
     }
+    const d = this.distort
+    if (d?.outMask && d.layerId === m.id && this.state.distortDirty) {
+      return { src: d.outMask, ox: 0, oy: 0 }
+    }
     const a = this.action
     if (a?.kind === "move" && a.layerId === m.id && !a.float) {
       return { src, ox: a.dx, oy: a.dy }
@@ -1409,7 +1489,10 @@ export class PaintEngine {
     let ox = 0
     let oy = 0
     const a = this.action
-    if (this.isLive(m, "pixels")) {
+    const d = this.distort
+    if (d?.out && d.layerId === m.id && this.state.distortDirty) {
+      src = d.out
+    } else if (this.isLive(m, "pixels")) {
       src = this.liveCanvas(base)
     } else if (a?.kind === "move" && a.layerId === m.id) {
       if (a.float) {
@@ -1525,7 +1608,10 @@ export class PaintEngine {
    */
   private compose(): HTMLCanvasElement {
     const { layers, docW, docH, background, showBackground } = this.state
-    const busy = !!this.liveStroke() || this.action?.kind === "move"
+    const busy =
+      !!this.liveStroke() ||
+      this.action?.kind === "move" ||
+      this.state.distortDirty
     const key = busy
       ? null
       : JSON.stringify([
@@ -1631,6 +1717,11 @@ export class PaintEngine {
       // Wet paint keeps moving on its own, so keep the frames coming.
       if (gpu.wet) this.requestRender()
     }
+    // Twirl, pinch and the like keep working for as long as the brush is held.
+    if (this.action?.kind === "liquify") {
+      this.liquifyAt(this.action.lx, this.action.ly, 0, 0)
+      if (this.state.liqTool !== "push") this.requestRender()
+    }
     const ctx = ctxOf(canvas)
     const { docW, docH, background, showBackground, symmetry } = this.state
     const { tx, ty, scale, rot } = this.view
@@ -1680,6 +1771,7 @@ export class PaintEngine {
 
     this.drawOverlay(ctx, canvas)
     this.drawVecOverlay(ctx)
+    this.drawDistortOverlay(ctx)
     this.placeTextEditor()
 
     if (this.settling && --this.settling.frames <= 0) this.finishSettle()
@@ -1772,7 +1864,11 @@ export class PaintEngine {
       ? this.state.toolSettings[tool].size
       : tool === "select-brush"
         ? this.state.selBrushSize
-        : 0
+        : tool === "distort" &&
+            this.state.distortActive &&
+            this.state.distortMode === "liquify"
+          ? this.state.liqSize
+          : 0
     const show =
       brushSize > 0 &&
       this.pointerInside &&
@@ -1892,6 +1988,8 @@ export class PaintEngine {
       this.pick(x, y)
     } else if (tool === "fill") {
       this.fillAt(x, y)
+    } else if (tool === "distort") {
+      if (e.button === 0) this.beginDistortDrag(id, x, y)
     } else if (
       tool === "shape" ||
       tool === "text" ||
@@ -2099,6 +2197,43 @@ export class PaintEngine {
       case "selbrush": {
         const [x, y] = this.screenToDoc(sx, sy)
         this.selBrushTo(a, x, y)
+        break
+      }
+      case "distort": {
+        const d = this.distort
+        if (!d?.ctrl) break
+        const [x, y] = this.screenToDoc(sx, sy)
+        d.ctrl[a.idx * 2] = x + a.ox
+        d.ctrl[a.idx * 2 + 1] = y + a.oy
+        updateMesh(d)
+        this.distortChanged()
+        break
+      }
+      case "liquify": {
+        const events =
+          typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : []
+        let moved = false
+        for (const ev of events.length > 0 ? events : [e]) {
+          const [lx, ly] = this.local(ev)
+          const [x, y] = this.screenToDoc(lx, ly)
+          // Take a fast move in short steps so the mesh stretches, not tears.
+          const dx = x - a.lx
+          const dy = y - a.ly
+          const n = Math.max(
+            1,
+            Math.ceil(Math.hypot(dx, dy) / (this.state.liqSize * 0.08))
+          )
+          for (let i = 1; i <= n; i++) {
+            if (
+              this.liquifyAt(a.lx + (dx * i) / n, a.ly + (dy * i) / n, dx / n, dy / n, false)
+            ) {
+              moved = true
+            }
+          }
+          a.lx = x
+          a.ly = y
+        }
+        if (moved) this.distortChanged()
         break
       }
       case "vec": {
@@ -3506,6 +3641,208 @@ export class PaintEngine {
     ctx.restore()
   }
 
+  // ---- distort -------------------------------------------------------------
+
+  /**
+   * Starts a distortion of the active layer in the current mode. Nothing
+   * changes until the mesh is moved; `quiet` suppresses the explanation when
+   * the layer can't be distorted.
+   */
+  private beginDistort(quiet = false) {
+    this.distort = null
+    const layer = this.activeLayer()
+    const fail = (text: string) => {
+      this.setState({ distortActive: false, distortDirty: false })
+      if (!quiet && text) this.notify(text)
+      this.updateCursor()
+      this.requestRender()
+    }
+    if (!layer) return fail("")
+    if (layer.fx) return fail("Adjustment layers hold no pixels to distort")
+    if (layer.vector) return fail("Rasterise this vector layer to distort it")
+    this.distortGL ??= DistortRenderer.create()
+    const { docW, docH, distortMode, warpGrid } = this.state
+    if (!this.distortGL || !this.distortGL.fits(docW, docH)) {
+      return fail("Distortion isn't available: WebGL2 can't handle this canvas")
+    }
+    this.distort = {
+      ...makeSession(distortMode, docW, docH, warpGrid),
+      layerId: layer.id,
+      out: null,
+      outMask: null,
+      uploaded: false,
+    }
+    this.setState({ distortActive: true, distortDirty: false })
+    this.updateCursor()
+    this.requestRender()
+  }
+
+  /** Redraws the distorted layer (and its mask) after the mesh has moved. */
+  private distortChanged() {
+    const d = this.distort
+    const gl = this.distortGL
+    const src = d && this.canvases.get(d.layerId)
+    if (!d || !gl || !src) return
+    const { docW, docH } = this.state
+    const mask = this.masks.get(d.layerId)
+    if (!d.uploaded) {
+      gl.setSource(0, src)
+      if (mask) gl.setSource(1, mask)
+      d.uploaded = true
+    }
+    const draw = (slot: 0 | 1, out: HTMLCanvasElement | null) => {
+      const c = out ?? makeCanvas(docW, docH)
+      const ctx = ctxOf(c)
+      ctx.globalCompositeOperation = "copy"
+      ctx.drawImage(gl.render(slot, d.mesh, docW, docH), 0, 0)
+      ctx.globalCompositeOperation = "source-over"
+      return c
+    }
+    d.out = draw(0, d.out)
+    if (mask) d.outMask = draw(1, d.outMask)
+    if (!this.state.distortDirty) this.setState({ distortDirty: true })
+    this.requestRender()
+  }
+
+  /** Makes the distortion in progress permanent, as one undo step. */
+  applyDistort() {
+    const d = this.distort
+    if (!d) return
+    this.distort = null
+    const dirty = this.state.distortDirty && !!d.out
+    this.setState({ distortDirty: false })
+    if (!dirty) {
+      if (this.state.tool === "distort") this.beginDistort(true)
+      return
+    }
+    // structural() starts a fresh session afterwards while the tool is active.
+    this.structural(() => {
+      this.canvases.set(d.layerId, d.out!)
+      this.bumpRev(d.layerId)
+      if (d.outMask && this.masks.has(d.layerId)) {
+        this.masks.set(d.layerId, d.outMask)
+        this.bumpRev(d.layerId, "mask")
+      }
+    })
+  }
+
+  /** Throws away the distortion in progress. */
+  resetDistort() {
+    if (this.action?.kind === "distort" || this.action?.kind === "liquify") {
+      this.action = null
+    }
+    if (this.state.tool === "distort") this.beginDistort(true)
+  }
+
+  setDistortOptions(
+    patch: Partial<
+      Pick<
+        EngineState,
+        "distortMode" | "warpGrid" | "liqTool" | "liqSize" | "liqStrength" | "distortGrid"
+      >
+    >
+  ) {
+    const next = { ...patch }
+    if (next.liqSize !== undefined) next.liqSize = clamp(Math.round(next.liqSize), 10, 2000)
+    if (next.liqStrength !== undefined) next.liqStrength = clamp(next.liqStrength, 0.05, 1)
+    if (next.warpGrid !== undefined) next.warpGrid = clamp(Math.round(next.warpGrid), 1, 6)
+    const s = this.state
+    const rebuild =
+      (next.distortMode !== undefined && next.distortMode !== s.distortMode) ||
+      (next.warpGrid !== undefined && next.warpGrid !== s.warpGrid)
+    // A different mesh can't carry the old one's edits, so those are applied first.
+    if (rebuild) this.applyDistort()
+    this.setState(next)
+    if (rebuild && this.state.tool === "distort") this.beginDistort(true)
+    this.updateCursor()
+    this.requestRender()
+  }
+
+  private beginDistortDrag(pointerId: number, x: number, y: number) {
+    if (!this.distort) this.beginDistort()
+    const d = this.distort
+    if (!d) return
+    if (!this.activeLayer()?.visible) {
+      this.notify("The active layer is hidden")
+      return
+    }
+    if (d.mode === "liquify") {
+      this.action = { kind: "liquify", pointerId, lx: x, ly: y }
+      this.liquifyAt(x, y, 0, 0)
+      return
+    }
+    // Dragging anywhere pulls the nearest control point along.
+    const idx = nearestControl(d, x, y)
+    if (idx < 0 || !d.ctrl) return
+    this.action = {
+      kind: "distort",
+      pointerId,
+      idx,
+      ox: d.ctrl[idx * 2] - x,
+      oy: d.ctrl[idx * 2 + 1] - y,
+    }
+  }
+
+  /** One touch of the liquify brush; returns whether the mesh moved. */
+  private liquifyAt(x: number, y: number, dx: number, dy: number, redraw = true) {
+    const d = this.distort
+    if (!d || d.mode !== "liquify") return false
+    const { liqTool, liqSize, liqStrength } = this.state
+    if (liqTool === "push" && dx === 0 && dy === 0) return false
+    const moved = liquifyDab(d.mesh, liqTool, x, y, dx, dy, liqSize / 2, liqStrength)
+    if (moved && redraw) this.distortChanged()
+    return moved
+  }
+
+  /** The mesh as a grid, with handles on its control points. */
+  private drawDistortOverlay(ctx: CanvasRenderingContext2D) {
+    const d = this.distort
+    if (!d || this.state.tool !== "distort") return
+    const px = 1 / this.view.scale
+    const { cols, rows, pos } = d.mesh
+    const stride = cols + 1
+    ctx.save()
+    ctx.setLineDash([])
+    ctx.lineJoin = "round"
+    if (this.state.distortGrid) {
+      ctx.beginPath()
+      for (let j = 0; j <= rows; j += d.step) {
+        for (let i = 0; i <= cols; i++) {
+          const k = (j * stride + i) * 2
+          if (i === 0) ctx.moveTo(pos[k], pos[k + 1])
+          else ctx.lineTo(pos[k], pos[k + 1])
+        }
+      }
+      for (let i = 0; i <= cols; i += d.step) {
+        for (let j = 0; j <= rows; j++) {
+          const k = (j * stride + i) * 2
+          if (j === 0) ctx.moveTo(pos[k], pos[k + 1])
+          else ctx.lineTo(pos[k], pos[k + 1])
+        }
+      }
+      ctx.lineWidth = 2.5 * px
+      ctx.strokeStyle = "rgba(0,0,0,0.22)"
+      ctx.stroke()
+      ctx.lineWidth = px
+      ctx.strokeStyle = "rgba(90,170,255,0.9)"
+      ctx.stroke()
+    }
+    if (d.ctrl) {
+      const a = this.action
+      const held = a?.kind === "distort" ? a.idx : -1
+      ctx.lineWidth = 1.5 * px
+      ctx.strokeStyle = "#2f8cff"
+      for (let i = 0; i < d.ctrl.length; i += 2) {
+        ctx.beginPath()
+        ctx.arc(d.ctrl[i], d.ctrl[i + 1], (i / 2 === held ? 6.5 : 5) * px, 0, Math.PI * 2)
+        ctx.fillStyle = i / 2 === held ? "#2f8cff" : "#fff"
+        ctx.fill()
+        ctx.stroke()
+      }
+    }
+    ctx.restore()
+  }
+
   // ---- keys ----------------------------------------------------------------
 
   /** Escape: abandons a selection shape in progress. */
@@ -3523,6 +3860,10 @@ export class PaintEngine {
     if (this.selectedObject()) {
       this.setState({ vecSel: null })
       this.requestRender()
+      return true
+    }
+    if (this.state.tool === "distort" && this.state.distortDirty) {
+      this.resetDistort()
       return true
     }
     return false
@@ -3732,6 +4073,7 @@ export class PaintEngine {
   exportPNG(): Promise<Blob | null> {
     this.cancelAction()
     this.commitText()
+    this.applyDistort()
     const { docW, docH, background, showBackground } = this.state
     const out = makeCanvas(docW, docH)
     const ctx = ctxOf(out)

@@ -2,6 +2,7 @@ import {
   ArrowsOutCardinalIcon,
   EraserIcon,
   EyedropperIcon,
+  GridNineIcon,
   HandIcon,
   HandPointingIcon,
   PaintBrushIcon,
@@ -154,6 +155,9 @@ export function ToolRail({ className }: { className?: string }) {
         <ShapeButton />
         <IconButton label="Text (T)" active={s.tool === "text"} onClick={() => engine.setTool("text")}>
           <TextTIcon />
+        </IconButton>
+        <IconButton label="Distort — warp, perspective, liquify (D)" active={s.tool === "distort"} onClick={() => engine.setTool("distort")}>
+          <GridNineIcon />
         </IconButton>
         <SelectButton />
         {VIEW_TOOLS.map((t) => (

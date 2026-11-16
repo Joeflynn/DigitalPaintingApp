@@ -4,6 +4,7 @@ import { BrushPanel } from "@/components/paint/BrushPanel"
 import { BrushStudio } from "@/components/paint/BrushStudio"
 import { CanvasView } from "@/components/paint/CanvasView"
 import { ColorPanel } from "@/components/paint/ColorPanel"
+import { DistortPanel } from "@/components/paint/DistortPanel"
 import { panelClass } from "@/components/paint/controls"
 import { LayersPanel } from "@/components/paint/LayersPanel"
 import { ToolRail } from "@/components/paint/ToolRail"
@@ -63,7 +64,11 @@ export function App() {
             <section className={cn(panelClass, "shrink-0")} aria-label="Colour">
               <ColorPanel />
             </section>
-            {vector ? (
+            {tool === "distort" ? (
+              <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Distort">
+                <DistortPanel />
+              </section>
+            ) : vector ? (
               <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Object">
                 <VectorPanel />
               </section>

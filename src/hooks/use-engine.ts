@@ -59,6 +59,7 @@ export function useShortcuts(togglePanels: () => void) {
       }
       if (e.key === "Enter") {
         engine.closePolygon()
+        engine.applyDistort()
         if (engine.editSelectedText()) e.preventDefault()
         return
       }
@@ -114,6 +115,9 @@ export function useShortcuts(togglePanels: () => void) {
           break
         case "u":
           engine.setTool("shape")
+          break
+        case "d":
+          engine.setTool("distort")
           break
         case "h":
           engine.setTool("hand")

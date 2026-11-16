@@ -457,6 +457,15 @@ function ContextBar() {
       </span>
     )
   }
+  if (s.tool === "distort") {
+    return (
+      <span className="text-[11px] text-muted-foreground">
+        {s.distortDirty
+          ? "Enter applies the distortion · Esc resets it"
+          : "Drag on the layer to distort it · choose a mode in the panel"}
+      </span>
+    )
+  }
   if (s.tool === "move") {
     return (
       <>
