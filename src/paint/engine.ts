@@ -5,6 +5,8 @@ import {
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
 } from "./brushes"
+import { defaultFx, getEffect, type LayerFx } from "./effects"
+import { GPUEffects } from "./gpu-effects"
 import { hexToHsv, hexToRgb, hsvToHex, rgbToHsv, type HSV } from "./color"
 import { loadAutosave, saveAutosave, type SavedDoc } from "./storage"
 import { Stroke } from "./stroke"
@@ -65,6 +67,11 @@ export interface LayerMeta {
   clip: boolean
   /** Changes whenever the layer's pixels change (drives thumbnails). */
   rev: number
+  /**
+   * Set on adjustment layers: they hold no pixels and instead apply this
+   * effect to everything beneath them (or, when clipped, to the layer below).
+   */
+  fx?: LayerFx
 }
 
 export type PaintTool = "brush" | "eraser" | "smudge"
@@ -197,10 +204,22 @@ export class PaintEngine {
   private listeners = new Set<() => void>()
   private canvases = new Map<string, HTMLCanvasElement>()
   private gpu: GPUBrush | null = null
+  private fx: GPUEffects | null = null
   /** A finished stroke whose wet paint is still flowing before it is committed. */
   private settling: { stroke: Stroke; layerId: string; frames: number } | null =
     null
   private scratchB = makeCanvas(1, 1)
+  /** Holds a base layer and its clipped layers while effects run on them. */
+  private scratchG = makeCanvas(1, 1)
+  /** The flattened document, used whenever adjustment layers are showing. */
+  private comp = makeCanvas(1, 1)
+  private compKey: string | null = null
+  private fxEdit: {
+    id: string
+    at: number
+    after: LayerFx
+    entry: UndoEntry
+  } | null = null
   private checker: CanvasPattern | null = null
 
   private display: HTMLCanvasElement | null = null
@@ -258,8 +277,11 @@ export class PaintEngine {
         this.settling = null
         this.action = null
         this.gpu = null
+        this.fx = null
+        this.requestRender()
         this.notify("Graphics device lost. Reload to resume painting.")
       })
+      this.fx = new GPUEffects(this.gpu.device)
     } catch {
       this.notify("Painting requires a browser with WebGPU enabled.")
     }
@@ -279,7 +301,7 @@ export class PaintEngine {
     this.allocate(doc.width, doc.height)
     this.canvases.clear()
     for (const meta of doc.layers) {
-      const c = makeCanvas(doc.width, doc.height)
+      const c = meta.fx ? makeCanvas(1, 1) : makeCanvas(doc.width, doc.height)
       const blob = doc.blobs[meta.id]
       if (blob) {
         const bmp = await createImageBitmap(blob)
@@ -310,6 +332,9 @@ export class PaintEngine {
 
   private allocate(w: number, h: number) {
     this.scratchB = makeCanvas(w, h)
+    this.scratchG = makeCanvas(w, h)
+    this.comp = makeCanvas(w, h)
+    this.compKey = null
   }
 
   newDocument(w: number, h: number, background = "#f6f3ec") {
@@ -479,6 +504,61 @@ export class PaintEngine {
     })
   }
 
+  /** Adds an adjustment layer running the given effect above the active layer. */
+  addAdjustment(type: string) {
+    const def = getEffect(type)
+    if (!def) return
+    if (!this.fx) {
+      this.notify("Effects require a browser with WebGPU enabled.")
+      return
+    }
+    this.structural(() => {
+      const { layers, activeLayerId } = this.state
+      this.layerCounter -= 1
+      const layer: LayerMeta = { ...this.makeLayer(def.label), fx: defaultFx(def) }
+      this.canvases.set(layer.id, makeCanvas(1, 1))
+      const idx = layers.findIndex((l) => l.id === activeLayerId)
+      const next = layers.slice()
+      next.splice(idx + 1, 0, layer)
+      this.setState({ layers: next, activeLayerId: layer.id })
+    })
+  }
+
+  /**
+   * Changes an adjustment layer's effect settings. Rapid changes (a slider
+   * drag) collapse into a single undo step.
+   */
+  setFxParams(id: string, params: Record<string, number>) {
+    this.cancelAction()
+    const before = this.state.layers.find((l) => l.id === id)?.fx
+    if (!before) return
+    const next: LayerFx = { ...before, params: { ...before.params, ...params } }
+    const set = (fx: LayerFx) => {
+      this.setState({
+        layers: this.state.layers.map((l) => (l.id === id ? { ...l, fx } : l)),
+      })
+    }
+    set(next)
+    const now = performance.now()
+    const e = this.fxEdit
+    if (
+      e &&
+      e.id === id &&
+      this.undoStack[this.undoStack.length - 1] === e.entry &&
+      now - e.at < 1200
+    ) {
+      e.after = next
+      e.at = now
+      this.scheduleSave()
+    } else {
+      const edit = { id, at: now, after: next, entry: null as unknown as UndoEntry }
+      edit.entry = { undo: () => set(before), redo: () => set(edit.after) }
+      this.fxEdit = edit
+      this.pushUndo(edit.entry)
+    }
+    this.requestRender()
+  }
+
   duplicateLayer(id: string) {
     const src = this.canvases.get(id)
     const meta = this.state.layers.find((l) => l.id === id)
@@ -522,12 +602,26 @@ export class PaintEngine {
     }
     const upper = layers[idx]
     const lower = layers[idx - 1]
+    if (lower.fx) {
+      this.notify("Can't merge into an adjustment layer")
+      return
+    }
+    if (upper.fx && !this.fx) return
     this.structural(() => {
-      const merged = cloneCanvas(this.canvases.get(lower.id)!)
-      const ctx = ctxOf(merged)
-      ctx.globalAlpha = upper.opacity
-      ctx.globalCompositeOperation = upper.clip ? "source-atop" : upper.blend
-      ctx.drawImage(this.canvases.get(upper.id)!, 0, 0)
+      let merged: HTMLCanvasElement
+      const baked =
+        upper.fx &&
+        this.fx?.apply(this.canvases.get(lower.id)!, upper.fx, upper.opacity)
+      if (upper.fx) {
+        // Bake the effect into the pixels of the layer below.
+        merged = cloneCanvas(baked || this.canvases.get(lower.id)!)
+      } else {
+        merged = cloneCanvas(this.canvases.get(lower.id)!)
+        const ctx = ctxOf(merged)
+        ctx.globalAlpha = upper.opacity
+        ctx.globalCompositeOperation = upper.clip ? "source-atop" : upper.blend
+        ctx.drawImage(this.canvases.get(upper.id)!, 0, 0)
+      }
       this.canvases.set(lower.id, merged)
       this.canvases.delete(upper.id)
       this.setState({
@@ -578,6 +672,10 @@ export class PaintEngine {
   ) {
     const src = this.canvases.get(id)
     if (!src) return
+    if (this.state.layers.find((l) => l.id === id)?.fx) {
+      this.notify("Adjustment layers have no pixels to edit")
+      return
+    }
     this.structural(() => {
       this.canvases.set(id, build(src))
       this.bumpRev(id)
@@ -831,29 +929,40 @@ export class PaintEngine {
     return null
   }
 
-  /** Draws every visible layer into ctx using whatever transform is set. */
-  private drawLayers(ctx: CanvasRenderingContext2D) {
-    const { layers } = this.state
+  /** The paint layer that clipped layer `index` is masked by, if any. */
+  private clipBase(index: number): LayerMeta | null {
+    if (!this.state.layers[index].clip) return null
+    const base = this.baseOf(index)
+    return base && !base.fx ? base : null
+  }
+
+  /** A layer's pixels as they should appear right now, mid-action included. */
+  private sourceOf(m: LayerMeta) {
+    const src = this.canvases.get(m.id)
+    if (!src) return null
     const a = this.action
     const live = this.liveStroke()
-    for (let i = 0; i < layers.length; i++) {
-      const m = layers[i]
-      if (!m.visible) continue
-      let src: HTMLCanvasElement | undefined = this.canvases.get(m.id)
-      if (!src) continue
-      let ox = 0
-      let oy = 0
-      if (live && this.gpu && live.layerId === m.id && live.stroke.dirty) {
-        // The GPU canvas shows this whole layer with the stroke applied.
-        src = this.gpu.canvas
-      } else if (a?.kind === "move" && a.layerId === m.id) {
-        ox = a.dx
-        oy = a.dy
-      }
-      if (m.clip) {
-        const base = this.baseOf(i)
-        const baseCanvas = base && this.canvases.get(base.id)
-        if (!base || !base.visible || !baseCanvas) continue
+    if (live && this.gpu && live.layerId === m.id && live.stroke.dirty) {
+      // The GPU canvas shows this whole layer with the stroke applied.
+      return { src: this.gpu.canvas, ox: 0, oy: 0 }
+    }
+    if (a?.kind === "move" && a.layerId === m.id) {
+      return { src, ox: a.dx, oy: a.dy }
+    }
+    return { src, ox: 0, oy: 0 }
+  }
+
+  /** Draws paint layer `i`, masked by its clipping base if it has one. */
+  private drawLayer(ctx: CanvasRenderingContext2D, i: number) {
+    const m = this.state.layers[i]
+    const s = this.sourceOf(m)
+    if (!s) return
+    let { src, ox, oy } = s
+    if (m.clip) {
+      const base = this.baseOf(i)
+      if (base && !base.fx) {
+        const baseCanvas = this.canvases.get(base.id)
+        if (!base.visible || !baseCanvas) return
         const B = ctxOf(this.scratchB)
         B.globalAlpha = 1
         B.globalCompositeOperation = "copy"
@@ -864,12 +973,121 @@ export class PaintEngine {
         ox = 0
         oy = 0
       }
-      ctx.globalAlpha = m.opacity
-      ctx.globalCompositeOperation = m.blend
-      ctx.drawImage(src, ox, oy)
+    }
+    ctx.globalAlpha = m.opacity
+    ctx.globalCompositeOperation = m.blend
+    ctx.drawImage(src, ox, oy)
+  }
+
+  /**
+   * Draws every visible paint layer into ctx using whatever transform is set.
+   * Adjustment layers are skipped; `compose()` is the path that honours them.
+   */
+  private drawLayers(ctx: CanvasRenderingContext2D) {
+    const { layers } = this.state
+    for (let i = 0; i < layers.length; i++) {
+      if (layers[i].visible && !layers[i].fx) this.drawLayer(ctx, i)
     }
     ctx.globalAlpha = 1
     ctx.globalCompositeOperation = "source-over"
+  }
+
+  /** True when a visible adjustment layer means the document must be flattened. */
+  private fxActive(): boolean {
+    return !!this.fx && this.state.layers.some((l) => l.fx && l.visible)
+  }
+
+  /** Replaces a canvas's contents with an effect applied to them. */
+  private applyFx(target: HTMLCanvasElement, m: LayerMeta) {
+    const out = m.fx && this.fx?.apply(target, m.fx, m.opacity)
+    if (!out) return
+    const ctx = ctxOf(target)
+    ctx.globalAlpha = 1
+    ctx.globalCompositeOperation = "copy"
+    ctx.drawImage(out, 0, 0)
+    ctx.globalCompositeOperation = "source-over"
+  }
+
+  /**
+   * Flattens the document — paper included, if shown — at full resolution,
+   * running each adjustment layer over what lies beneath it. The result is
+   * cached until something that affects it changes.
+   */
+  private compose(): HTMLCanvasElement {
+    const { layers, docW, docH, background, showBackground } = this.state
+    const busy = !!this.liveStroke() || this.action?.kind === "move"
+    const key = busy
+      ? null
+      : JSON.stringify([
+          docW,
+          docH,
+          showBackground && background,
+          layers.map((l) => [
+            l.id,
+            l.rev,
+            l.visible,
+            l.opacity,
+            l.blend,
+            l.clip,
+            l.fx,
+          ]),
+        ])
+    if (key && key === this.compKey) return this.comp
+    this.compKey = key
+
+    const A = ctxOf(this.comp)
+    A.setTransform(1, 0, 0, 1, 0, 0)
+    A.globalAlpha = 1
+    A.globalCompositeOperation = "source-over"
+    A.clearRect(0, 0, docW, docH)
+    if (showBackground) {
+      A.fillStyle = background
+      A.fillRect(0, 0, docW, docH)
+    }
+
+    for (let i = 0; i < layers.length; i++) {
+      const m = layers[i]
+      if (!m.visible) continue
+      if (m.fx) {
+        // Clipped adjustments are handled with their base layer below.
+        if (!this.clipBase(i)) this.applyFx(this.comp, m)
+        continue
+      }
+      // The run of layers clipped to this one.
+      let end = i
+      if (!m.clip) {
+        while (end + 1 < layers.length && layers[end + 1].clip) end++
+      }
+      const grouped = layers
+        .slice(i + 1, end + 1)
+        .some((l) => l.fx && l.visible)
+      if (!grouped) {
+        this.drawLayer(A, i)
+        continue
+      }
+      // A clipped adjustment only affects its base (and the layers clipped
+      // beneath it), so build that stack on its own before laying it down.
+      const s = this.sourceOf(m)
+      if (s) {
+        const G = ctxOf(this.scratchG)
+        G.globalAlpha = 1
+        G.globalCompositeOperation = "copy"
+        G.drawImage(s.src, s.ox, s.oy)
+        for (let j = i + 1; j <= end; j++) {
+          const f = layers[j]
+          if (!f.visible) continue
+          if (f.fx) this.applyFx(this.scratchG, f)
+          else this.drawLayer(G, j)
+        }
+        A.globalAlpha = m.opacity
+        A.globalCompositeOperation = m.blend
+        A.drawImage(this.scratchG, 0, 0)
+      }
+      i = end
+    }
+    A.globalAlpha = 1
+    A.globalCompositeOperation = "source-over"
+    return this.comp
   }
 
   private getChecker(ctx: CanvasRenderingContext2D): CanvasPattern | null {
@@ -932,7 +1150,8 @@ export class PaintEngine {
     ctx.clip()
     ctx.imageSmoothingEnabled = scale * d < 4
     ctx.imageSmoothingQuality = scale * d < 0.6 ? "high" : "medium"
-    this.drawLayers(ctx)
+    if (this.fxActive()) ctx.drawImage(this.compose(), 0, 0)
+    else this.drawLayers(ctx)
     ctx.restore()
 
     if (symmetry) {
@@ -1067,6 +1286,10 @@ export class PaintEngine {
       if (!layer) return
       if (!layer.visible) {
         this.notify("The active layer is hidden")
+        return
+      }
+      if (layer.fx) {
+        this.notify("Select a paint layer — adjustment layers hold no pixels")
         return
       }
       if (tool === "move") {
@@ -1394,7 +1617,8 @@ export class PaintEngine {
       ctx.fillRect(0, 0, 1, 1)
     }
     ctx.setTransform(1, 0, 0, 1, -Math.floor(x), -Math.floor(y))
-    this.drawLayers(ctx)
+    if (this.fxActive()) ctx.drawImage(this.compose(), 0, 0)
+    else this.drawLayers(ctx)
     const px = ctx.getImageData(0, 0, 1, 1).data
     if (px[3] === 0) return
     this.setState({ color: rgbToHsv(px[0], px[1], px[2], this.state.color.h) })
@@ -1408,6 +1632,10 @@ export class PaintEngine {
     if (!layer || x0 < 0 || y0 < 0 || x0 >= w || y0 >= h) return
     if (!layer.visible) {
       this.notify("The active layer is hidden")
+      return
+    }
+    if (layer.fx) {
+      this.notify("Select a paint layer — adjustment layers hold no pixels")
       return
     }
     const rgb = hexToRgb(hsvToHex(this.state.color))
@@ -1503,7 +1731,8 @@ export class PaintEngine {
       ctx.fillStyle = background
       ctx.fillRect(0, 0, docW, docH)
     }
-    this.drawLayers(ctx)
+    if (this.fxActive()) ctx.drawImage(this.compose(), 0, 0)
+    else this.drawLayers(ctx)
     return new Promise((resolve) => out.toBlob(resolve, "image/png"))
   }
 
@@ -1520,6 +1749,7 @@ export class PaintEngine {
     const s = this.state
     const blobs: Record<string, Blob> = {}
     for (const meta of s.layers) {
+      if (meta.fx) continue
       const cached = this.blobCache.get(meta.id)
       if (cached && cached.rev === meta.rev) {
         blobs[meta.id] = cached.blob

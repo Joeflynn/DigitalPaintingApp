@@ -1,4 +1,5 @@
 import {
+  ArrowCounterClockwiseIcon,
   ArrowElbowDownRightIcon,
   ArrowLineDownIcon,
   CaretDownIcon,
@@ -9,13 +10,22 @@ import {
   LockSimpleIcon,
   LockSimpleOpenIcon,
   PlusIcon,
+  SlidersHorizontalIcon,
   TrashIcon,
 } from "@phosphor-icons/react"
 import { useEffect, useRef, useState } from "react"
 
-import { IconButton, Slider } from "@/components/paint/controls"
+import { IconButton, Slider, panelClass } from "@/components/paint/controls"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
+import {
+  defaultFx,
+  EFFECT_GROUPS,
+  EFFECTS,
+  formatParam,
+  getEffect,
+  type EffectDef,
+} from "@/paint/effects"
 import { BLEND_MODES, engine, type BlendMode, type LayerMeta } from "@/paint/engine"
 
 const checker =
@@ -47,6 +57,104 @@ function LayerThumb({ layer, aspect }: { layer: LayerMeta; aspect: number }) {
   )
 }
 
+function FxThumb() {
+  return (
+    <div className="grid h-9 w-[52px] shrink-0 place-items-center rounded-md border border-white/10 bg-[linear-gradient(135deg,oklch(0.42_0.09_250),oklch(0.42_0.11_340))] text-white/90">
+      <SlidersHorizontalIcon className="size-4" />
+    </div>
+  )
+}
+
+/** Sliders for an adjustment layer's effect. */
+function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
+  const fx = layer.fx!
+  return (
+    <div className="flex flex-col gap-2 px-2 pt-0.5 pb-2">
+      <div className="flex items-center gap-2">
+        <span className="w-16 truncate text-[10px] text-muted-foreground uppercase">Strength</span>
+        <Slider
+          label="Effect strength"
+          className="flex-1"
+          min={0}
+          max={1}
+          value={layer.opacity}
+          onChange={(v) => engine.setLayerProps(layer.id, { opacity: v }, false)}
+        />
+        <span className="w-7 text-right text-[10px] text-muted-foreground tabular-nums">
+          {Math.round(layer.opacity * 100)}
+        </span>
+      </div>
+      {def.params.map((p) => {
+        const v = fx.params[p.key] ?? p.value
+        return (
+          <div key={p.key} className="flex items-center gap-2">
+            <span className="w-16 truncate text-[10px] text-muted-foreground uppercase">{p.label}</span>
+            <Slider
+              label={p.label}
+              className="flex-1"
+              min={p.min}
+              max={p.max}
+              exp={p.exp}
+              value={v}
+              onChange={(n) => engine.setFxParams(layer.id, { [p.key]: n })}
+            />
+            <span className="w-7 text-right text-[10px] text-muted-foreground tabular-nums">
+              {formatParam(p, v)}
+            </span>
+          </div>
+        )
+      })}
+      <div className="flex items-center gap-1.5">
+        <span className="mr-auto text-[10px] text-muted-foreground">
+          {layer.clip ? "Affects the layer below" : "Affects all layers below"}
+        </span>
+        <IconButton
+          label="Reset to defaults"
+          className="size-7"
+          onClick={() => engine.setFxParams(layer.id, defaultFx(def).params)}
+        >
+          <ArrowCounterClockwiseIcon />
+        </IconButton>
+        <IconButton
+          label="Clipping mask — affect only the layer below"
+          className="size-7"
+          active={layer.clip}
+          onClick={() => engine.setLayerProps(layer.id, { clip: !layer.clip })}
+        >
+          <ArrowElbowDownRightIcon />
+        </IconButton>
+      </div>
+    </div>
+  )
+}
+
+function AddEffectMenu({ onPick }: { onPick: (id: string) => void }) {
+  return (
+    <div className="flex max-h-[min(60vh,26rem)] flex-col gap-2 overflow-y-auto [scrollbar-width:thin]">
+      {EFFECT_GROUPS.map((group) => (
+        <div key={group}>
+          <div className="px-1.5 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+            {group}
+          </div>
+          <div className="grid grid-cols-2 gap-0.5">
+            {EFFECTS.filter((e) => e.group === group).map((e) => (
+              <button
+                key={e.id}
+                type="button"
+                title={e.hint}
+                onClick={() => onPick(e.id)}
+                className="truncate rounded-lg px-1.5 py-1.5 text-left text-xs text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {e.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function LayerRow({
   layer,
   active,
@@ -58,6 +166,7 @@ function LayerRow({
 }) {
   const [editing, setEditing] = useState(false)
   const blend = BLEND_MODES.find((b) => b.id === layer.blend)
+  const fxDef = layer.fx ? getEffect(layer.fx.type) : undefined
 
   return (
     <div
@@ -80,7 +189,7 @@ function LayerRow({
         {layer.clip && (
           <ArrowElbowDownRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
         )}
-        <LayerThumb layer={layer} aspect={aspect} />
+        {layer.fx ? <FxThumb /> : <LayerThumb layer={layer} aspect={aspect} />}
         <div className="min-w-0 flex-1">
           {editing ? (
             <input
@@ -109,7 +218,7 @@ function LayerRow({
             </div>
           )}
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-            <span>{blend?.label ?? "Normal"}</span>
+            <span>{layer.fx ? "Adjustment" : (blend?.label ?? "Normal")}</span>
             <span>·</span>
             <span className="tabular-nums">{Math.round(layer.opacity * 100)}%</span>
             {layer.alphaLock && <LockSimpleIcon className="size-3" weight="fill" />}
@@ -127,7 +236,9 @@ function LayerRow({
         </IconButton>
       </div>
 
-      {active && (
+      {active && fxDef && <FxControls layer={layer} def={fxDef} />}
+
+      {active && !layer.fx && (
         <div className="flex flex-col gap-2 px-2 pt-0.5 pb-2">
           <div className="flex items-center gap-2">
             <span className="w-12 text-[10px] text-muted-foreground uppercase">Opacity</span>
@@ -183,9 +294,23 @@ export function LayersPanel() {
   const id = s.activeLayerId
   const idx = s.layers.findIndex((l) => l.id === id)
   const aspect = s.docW / s.docH
+  const [fxMenu, setFxMenu] = useState(false)
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {fxMenu && (
+        <>
+          <div className="fixed inset-0 z-40" onPointerDown={() => setFxMenu(false)} />
+          <div className={cn(panelClass, "absolute inset-x-0 bottom-full z-50 mb-2 p-2")}>
+            <AddEffectMenu
+              onPick={(type) => {
+                engine.addAdjustment(type)
+                setFxMenu(false)
+              }}
+            />
+          </div>
+        </>
+      )}
       <div className="flex items-center gap-0.5 px-2 pt-1.5 pb-1">
         <h2 className="mr-auto pl-1 text-xs font-semibold tracking-wide text-foreground uppercase">
           Layers
@@ -204,6 +329,9 @@ export function LayersPanel() {
         </IconButton>
         <IconButton label="Delete layer" className="size-7" onClick={() => engine.deleteLayer(id)}>
           <TrashIcon />
+        </IconButton>
+        <IconButton label="Add effect or adjustment layer" className="size-7" active={fxMenu} onClick={() => setFxMenu(!fxMenu)}>
+          <SlidersHorizontalIcon />
         </IconButton>
         <IconButton label="New layer" className="size-7 bg-white/10 text-foreground" onClick={() => engine.addLayer()}>
           <PlusIcon />

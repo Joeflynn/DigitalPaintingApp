@@ -45,7 +45,7 @@ const LERP: GPUBlendState = {
 export class GPUBrush {
   readonly canvas = document.createElement("canvas")
 
-  private device: GPUDevice
+  readonly device: GPUDevice
   private context: GPUCanvasContext
   private deposit: GPURenderPipeline
   private reservoir: GPURenderPipeline
