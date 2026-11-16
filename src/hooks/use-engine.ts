@@ -59,6 +59,14 @@ export function useShortcuts(togglePanels: () => void) {
       }
       if (e.key === "Enter") {
         engine.closePolygon()
+        if (engine.editSelectedText()) e.preventDefault()
+        return
+      }
+      if (e.key.startsWith("Arrow")) {
+        const d = e.shiftKey ? 10 : 1
+        const dx = e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0
+        const dy = e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0
+        if (engine.nudgeObject(dx, dy)) e.preventDefault()
         return
       }
       if (e.key === "Backspace" || e.key === "Delete") {
@@ -98,6 +106,14 @@ export function useShortcuts(togglePanels: () => void) {
           break
         case "v":
           engine.setTool("move")
+          break
+        case "t":
+          engine.setTool("text")
+          // Don't let this keypress land in the editor.
+          e.preventDefault()
+          break
+        case "u":
+          engine.setTool("shape")
           break
         case "h":
           engine.setTool("hand")

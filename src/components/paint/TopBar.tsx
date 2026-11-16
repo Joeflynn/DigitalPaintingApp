@@ -395,6 +395,8 @@ function ContextBar() {
   const s = useEngine()
   const label = "text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
 
+  const isVectorLayer = !!s.layers.find((l) => l.id === s.activeLayerId)?.vector
+
   if (isSelectTool(s.tool)) return <SelectContext />
 
   if (isPaintTool(s.tool)) {
@@ -442,6 +444,17 @@ function ContextBar() {
         />
         <span className="w-7 text-[11px] text-foreground tabular-nums">{s.fillTolerance}</span>
       </>
+    )
+  }
+  if (s.tool === "shape" || s.tool === "text" || (s.tool === "move" && isVectorLayer)) {
+    return (
+      <span className="text-[11px] text-muted-foreground">
+        {s.tool === "shape"
+          ? "Drag to draw a shape · Shift constrains · drag handles to resize or rotate"
+          : s.tool === "text"
+            ? "Click to type · drag for a text box · click text to edit it · Esc to finish"
+            : "Click an object to select · drag to move · double-click text to edit"}
+      </span>
     )
   }
   if (s.tool === "move") {

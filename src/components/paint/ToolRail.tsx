@@ -6,16 +6,19 @@ import {
   HandPointingIcon,
   PaintBrushIcon,
   PaintBucketIcon,
+  TextTIcon,
 } from "@phosphor-icons/react"
 import { useState, type ReactNode } from "react"
 
 import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
 import { SELECT_TOOL_INFO } from "@/components/paint/select-tools"
+import { SHAPE_ICONS } from "@/components/paint/VectorPanel"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE } from "@/paint/brushes"
 import { hsvToHex } from "@/paint/color"
 import { engine, isPaintTool, isSelectTool, type ToolId } from "@/paint/engine"
+import { SHAPE_KINDS } from "@/paint/vector"
 
 const TOOLS: { id: ToolId; label: string; icon: ReactNode }[] = [
   { id: "brush", label: "Brush (B)", icon: <PaintBrushIcon /> },
@@ -26,7 +29,7 @@ const TOOLS: { id: ToolId; label: string; icon: ReactNode }[] = [
 ]
 
 const VIEW_TOOLS: typeof TOOLS = [
-  { id: "move", label: "Move layer or selection (V)", icon: <ArrowsOutCardinalIcon /> },
+  { id: "move", label: "Move layer, selection or object (V)", icon: <ArrowsOutCardinalIcon /> },
   { id: "hand", label: "Pan (H, or hold Space)", icon: <HandIcon /> },
 ]
 
@@ -81,6 +84,55 @@ function SelectButton() {
   )
 }
 
+/** One rail button for the shape tool, with a flyout to pick the shape. */
+function ShapeButton() {
+  const s = useEngine()
+  const [open, setOpen] = useState(false)
+  const active = s.tool === "shape"
+  const kind = s.shapeStyle.shape
+  useDismiss(open, () => setOpen(false))
+
+  return (
+    <div className="relative">
+      <IconButton
+        label={`${SHAPE_KINDS.find((k) => k.id === kind)?.label} (U) — click again for more shapes`}
+        active={active}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-popover
+        onClick={() => {
+          if (!active) engine.setTool("shape")
+          setOpen(!open)
+        }}
+      >
+        {SHAPE_ICONS[kind]}
+        <span className="pointer-events-none absolute right-1 bottom-1 size-0 border-4 border-transparent border-r-current border-b-current opacity-70" />
+      </IconButton>
+      {open && (
+        <div
+          role="menu"
+          data-popover
+          className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5")}
+        >
+          {SHAPE_KINDS.map((k) => (
+            <IconButton
+              key={k.id}
+              label={k.label}
+              active={active && kind === k.id}
+              onClick={() => {
+                engine.setShapeKind(k.id)
+                setOpen(false)
+              }}
+            >
+              {SHAPE_ICONS[k.id]}
+            </IconButton>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ToolRail({ className }: { className?: string }) {
   const s = useEngine()
   const tool = isPaintTool(s.tool) ? s.tool : "brush"
@@ -99,6 +151,10 @@ export function ToolRail({ className }: { className?: string }) {
             {t.icon}
           </IconButton>
         ))}
+        <ShapeButton />
+        <IconButton label="Text (T)" active={s.tool === "text"} onClick={() => engine.setTool("text")}>
+          <TextTIcon />
+        </IconButton>
         <SelectButton />
         {VIEW_TOOLS.map((t) => (
           <IconButton

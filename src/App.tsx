@@ -8,9 +8,10 @@ import { panelClass } from "@/components/paint/controls"
 import { LayersPanel } from "@/components/paint/LayersPanel"
 import { ToolRail } from "@/components/paint/ToolRail"
 import { TopBar } from "@/components/paint/TopBar"
+import { VectorPanel } from "@/components/paint/VectorPanel"
 import { useEngine, useShortcuts } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
-import { engine } from "@/paint/engine"
+import { engine, selectedObject } from "@/paint/engine"
 
 function Toast() {
   const { notice } = useEngine()
@@ -41,7 +42,9 @@ export function App() {
   const togglePanels = useCallback(() => setPanelsOpen((v) => !v), [])
   const [studio, setStudio] = useState(false)
   const closeStudio = useCallback(() => setStudio(false), [])
-  const { tool } = useEngine()
+  const state = useEngine()
+  const { tool } = state
+  const vector = tool === "shape" || tool === "text" || !!selectedObject(state)
   useShortcuts(togglePanels)
 
   useEffect(() => {
@@ -60,9 +63,15 @@ export function App() {
             <section className={cn(panelClass, "shrink-0")} aria-label="Colour">
               <ColorPanel />
             </section>
-            <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Brushes">
-              <BrushPanel onOpenStudio={() => setStudio(true)} />
-            </section>
+            {vector ? (
+              <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Object">
+                <VectorPanel />
+              </section>
+            ) : (
+              <section className={cn(panelClass, "flex min-h-28 flex-1 flex-col")} aria-label="Brushes">
+                <BrushPanel onOpenStudio={() => setStudio(true)} />
+              </section>
+            )}
             <section className={cn(panelClass, "flex min-h-36 flex-[1.15] flex-col")} aria-label="Layers">
               <LayersPanel />
             </section>

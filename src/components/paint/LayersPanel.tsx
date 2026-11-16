@@ -7,6 +7,7 @@ import {
   CheckIcon,
   CircleHalfIcon,
   SelectionIcon,
+  ShapesIcon,
   ShuffleIcon,
   SwapIcon,
   CopyIcon,
@@ -422,6 +423,7 @@ function LayerRow({
             </div>
           )}
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            {layer.vector && <ShapesIcon className="size-3" weight="fill" aria-label="Vector layer" />}
             <span>{onMask ? "Editing mask" : layer.fx ? "Adjustment" : (blend?.label ?? "Normal")}</span>
             <span>·</span>
             <span className="tabular-nums">{Math.round(layer.opacity * 100)}%</span>
@@ -470,14 +472,25 @@ function LayerRow({
                 </option>
               ))}
             </select>
-            <IconButton
-              label="Alpha lock — paint only on existing pixels"
-              className="size-7"
-              active={layer.alphaLock}
-              onClick={() => engine.setLayerProps(layer.id, { alphaLock: !layer.alphaLock })}
-            >
-              {layer.alphaLock ? <LockSimpleIcon /> : <LockSimpleOpenIcon />}
-            </IconButton>
+            {layer.vector ? (
+              <button
+                type="button"
+                title="Turn this vector layer into pixels so it can be painted on"
+                onClick={() => engine.rasterizeLayer(layer.id)}
+                className="h-7 shrink-0 rounded-lg px-2 text-[11px] text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                Rasterise
+              </button>
+            ) : (
+              <IconButton
+                label="Alpha lock — paint only on existing pixels"
+                className="size-7"
+                active={layer.alphaLock}
+                onClick={() => engine.setLayerProps(layer.id, { alphaLock: !layer.alphaLock })}
+              >
+                {layer.alphaLock ? <LockSimpleIcon /> : <LockSimpleOpenIcon />}
+              </IconButton>
+            )}
             <IconButton
               label="Clipping mask — clip to the layer below"
               className="size-7"

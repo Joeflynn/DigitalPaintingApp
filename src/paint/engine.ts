@@ -22,6 +22,27 @@ import { hexToHsv, hexToRgb, hsvToHex, rgbToHsv, type HSV } from "./color"
 import { loadAutosave, saveAutosave, type SavedDoc } from "./storage"
 import { Stroke, type SampleExtra } from "./stroke"
 import {
+  DEFAULT_SHAPE_STYLE,
+  DEFAULT_TEXT_STYLE,
+  dragHandle,
+  fitText,
+  fontsUsed,
+  handlesOf,
+  hitHandle,
+  hitObject,
+  isLine,
+  makeShape,
+  makeText,
+  normalizeShape,
+  rasterize,
+  type Handle,
+  type ShapeKind,
+  type ShapeStyle,
+  type TextStyle,
+  type VecPatch,
+  type VectorObject,
+} from "./vector"
+import {
   clamp,
   cloneCanvas,
   cropCanvas,
@@ -92,6 +113,11 @@ export interface LayerMeta {
   maskOff?: boolean
   /** Changes whenever the mask's pixels change. */
   maskRev?: number
+  /**
+   * Set on vector layers: the editable shapes and text, bottom first. The
+   * layer's pixels are just a rasterised copy of these.
+   */
+  vector?: VectorObject[]
 }
 
 /** Which of a layer's two canvases an edit goes to. */
@@ -119,6 +145,8 @@ export type ToolId =
   | SelectTool
   | "fill"
   | "eyedropper"
+  | "shape"
+  | "text"
   | "move"
   | "hand"
 
@@ -128,6 +156,18 @@ export function isSelectTool(t: ToolId): t is SelectTool {
 
 export function isPaintTool(t: ToolId): t is PaintTool {
   return t === "brush" || t === "eraser" || t === "smudge"
+}
+
+/** Tools that create or edit vector objects. */
+export function isVectorTool(t: ToolId): boolean {
+  return t === "shape" || t === "text" || t === "move"
+}
+
+/** The vector object selected on the active layer, if any. */
+export function selectedObject(s: EngineState): VectorObject | null {
+  if (!s.vecSel) return null
+  const layer = s.layers.find((l) => l.id === s.activeLayerId)
+  return layer?.vector?.find((o) => o.id === s.vecSel) ?? null
 }
 
 export interface ToolSettings {
@@ -164,6 +204,15 @@ export interface EngineState extends SelectOptions {
   zoom: number
   rotation: number
   notice: { id: number; text: string } | null
+  /** Id of the selected vector object on the active layer. */
+  vecSel: string | null
+  /** The selected text object is being typed into. */
+  textEditing: boolean
+  /** Which paint of a vector object the colour panel drives. */
+  vecPaint: "fill" | "stroke"
+  /** Style given to new shapes, and to new text. */
+  shapeStyle: ShapeStyle
+  textStyle: TextStyle
 }
 
 interface UndoEntry {
@@ -227,6 +276,24 @@ type Action =
       dy: number
       /** Selected pixels lifted off the layer, and what they left behind. */
       float?: { cut: HTMLCanvasElement; rest: HTMLCanvasElement }
+    }
+  | {
+      kind: "vec"
+      pointerId: number
+      mode: "draw" | "move" | "resize" | "rotate"
+      layerId: string
+      objId: string
+      /** The object as it was when the drag began. */
+      orig: VectorObject
+      handle?: Handle
+      x0: number
+      y0: number
+      sx: number
+      sy: number
+      before: StructSnap
+      moved: boolean
+      /** Releasing without dragging starts editing this text. */
+      edit: boolean
     }
 
 interface Gesture {
@@ -298,6 +365,11 @@ export class PaintEngine {
     selBrushSize: 60,
     selBrushEdge: true,
     selBrushContrast: 30,
+    vecSel: null,
+    textEditing: false,
+    vecPaint: "fill",
+    shapeStyle: DEFAULT_SHAPE_STYLE,
+    textStyle: DEFAULT_TEXT_STYLE,
   }
 
   private listeners = new Set<() => void>()
@@ -343,6 +415,28 @@ export class PaintEngine {
     entry: UndoEntry
   } | null = null
   private checker: CanvasPattern | null = null
+  /** What each vector layer's canvas currently shows. */
+  private drawn = new WeakMap<
+    HTMLCanvasElement,
+    { objs: VectorObject[]; hide: string | null }
+  >()
+  private vecEdit: {
+    key: string
+    at: number
+    after: StructSnap
+    entry: UndoEntry
+  } | null = null
+  /** The text object being typed into, and the document before that began. */
+  private textEdit: {
+    layerId: string
+    objId: string
+    before: StructSnap
+    /** The text when editing began; null for a brand-new object. */
+    initial: string | null
+  } | null = null
+  private textEl: HTMLTextAreaElement | null = null
+  private lastVecDown = { id: "", t: 0 }
+  private fontsAsked = new Set<string>()
 
   private display: HTMLCanvasElement | null = null
   private cursorEl: HTMLElement | null = null
@@ -428,7 +522,7 @@ export class PaintEngine {
     this.resetSelection()
     for (const meta of doc.layers) {
       const c = meta.fx ? makeCanvas(1, 1) : makeCanvas(doc.width, doc.height)
-      const blob = doc.blobs[meta.id]
+      const blob = meta.vector ? undefined : doc.blobs[meta.id]
       if (blob) {
         const bmp = await createImageBitmap(blob)
         ctxOf(c).drawImage(bmp, 0, 0)
@@ -469,7 +563,10 @@ export class PaintEngine {
       editMask: false,
       canUndo: false,
       canRedo: false,
+      vecSel: null,
+      textEditing: false,
     })
+    this.syncVector()
     this.fit()
   }
 
@@ -499,6 +596,7 @@ export class PaintEngine {
 
   newDocument(w: number, h: number, background = "#f6f3ec") {
     this.cancelAction()
+    this.commitText()
     this.allocate(w, h)
     this.canvases.clear()
     this.masks.clear()
@@ -523,6 +621,7 @@ export class PaintEngine {
       editMask: false,
       canUndo: false,
       canRedo: false,
+      vecSel: null,
     })
     this.fit()
     this.scheduleSave()
@@ -578,6 +677,7 @@ export class PaintEngine {
 
   undo() {
     this.finishSettle()
+    this.commitText()
     if (this.action) return
     const e = this.undoStack.pop()
     if (!e) return
@@ -588,6 +688,7 @@ export class PaintEngine {
 
   redo() {
     this.finishSettle()
+    this.commitText()
     if (this.action) return
     const e = this.redoStack.pop()
     if (!e) return
@@ -622,19 +723,27 @@ export class PaintEngine {
     this.poly = null
     this.selection = s.selection
     this.selRev++
+    this.textEdit = null
+    const active = s.layers.find((l) => l.id === s.activeLayerId)
+    const sel = this.state.vecSel
     this.setState({
       layers: s.layers,
       activeLayerId: s.activeLayerId,
       hasSelection: !!s.selection,
       editMask: s.editMask,
+      textEditing: false,
+      vecSel: sel && active?.vector?.some((o) => o.id === sel) ? sel : null,
     })
+    this.syncVector()
   }
 
   /** Runs a structural change and records before/after for undo. */
   private structural(fn: () => void) {
     this.cancelAction()
+    this.commitText()
     const before = this.snap()
     fn()
+    this.syncVector()
     const after = this.snap()
     this.pushUndo({
       undo: () => this.restore(before),
@@ -661,8 +770,14 @@ export class PaintEngine {
 
   setActiveLayer(id: string) {
     this.finishSettle()
+    this.commitText()
     if (this.action) return
-    this.setState({ activeLayerId: id, editMask: false })
+    if (id === this.state.activeLayerId) {
+      this.setState({ editMask: false })
+      return
+    }
+    this.setState({ activeLayerId: id, editMask: false, vecSel: null })
+    this.requestRender()
   }
 
   addLayer() {
@@ -872,7 +987,13 @@ export class PaintEngine {
           .filter((l) => l.id !== upper.id)
           .map((l) =>
             l.id === lower.id
-              ? { ...l, rev: nextRev(), mask: false, maskOff: false }
+              ? {
+                  ...l,
+                  rev: nextRev(),
+                  mask: false,
+                  maskOff: false,
+                  vector: undefined,
+                }
               : l
           ),
         activeLayerId: lower.id,
@@ -935,11 +1056,13 @@ export class PaintEngine {
     const map = target === "mask" ? this.masks : this.canvases
     const src = map.get(id)
     if (!src) return
-    if (
-      target === "pixels" &&
-      this.state.layers.find((l) => l.id === id)?.fx
-    ) {
+    const meta = this.state.layers.find((l) => l.id === id)
+    if (target === "pixels" && meta?.fx) {
       this.notify("Adjustment layers have no pixels to edit")
+      return
+    }
+    if (target === "pixels" && meta?.vector) {
+      this.notify("Rasterise this vector layer to edit its pixels")
       return
     }
     this.structural(() => {
@@ -978,14 +1101,28 @@ export class PaintEngine {
   // ---- tools & colour ------------------------------------------------------
 
   setTool(tool: ToolId) {
-    if (this.poly) {
-      this.poly = null
-      this.requestRender()
-    }
-    this.setState(
-      isSelectTool(tool) ? { tool, selectTool: tool } : { tool }
-    )
+    this.commitText()
+    if (this.poly) this.poly = null
+    this.setState({
+      tool,
+      ...(isSelectTool(tool) ? { selectTool: tool } : null),
+      // A selected object stays selected only for the move tool.
+      ...(tool === "move" ? null : { vecSel: null }),
+    })
+    this.styleFromColor()
+    this.requestRender()
     this.updateCursor()
+  }
+
+  /** New shapes and text start out in the current colour. */
+  private styleFromColor() {
+    const { tool, vecPaint, shapeStyle, textStyle } = this.state
+    const hex = hsvToHex(this.state.color)
+    if (tool === "text" && textStyle[vecPaint] !== null) {
+      this.setState({ textStyle: { ...textStyle, [vecPaint]: hex } })
+    } else if (tool === "shape" && shapeStyle[vecPaint] !== null) {
+      this.setState({ shapeStyle: { ...shapeStyle, [vecPaint]: hex } })
+    }
   }
 
   /** The paint tool whose brush settings the UI should show. */
@@ -1032,11 +1169,14 @@ export class PaintEngine {
 
   setColor(color: HSV) {
     this.setState({ color })
+    this.colorToVector()
   }
 
   setColorHex(hex: string) {
     const hsv = hexToHsv(hex, this.state.color.h)
-    if (hsv) this.setState({ color: hsv })
+    if (!hsv) return
+    this.setState({ color: hsv })
+    this.colorToVector()
   }
 
   swapColors() {
@@ -1539,6 +1679,8 @@ export class PaintEngine {
     }
 
     this.drawOverlay(ctx, canvas)
+    this.drawVecOverlay(ctx)
+    this.placeTextEditor()
 
     if (this.settling && --this.settling.frames <= 0) this.finishSettle()
   }
@@ -1619,8 +1761,12 @@ export class PaintEngine {
         : this.spaceDown || tool === "hand"
           ? "grab"
           : tool === "move"
-            ? "move"
-            : "crosshair"
+            ? this.activeLayer()?.vector
+              ? "default"
+              : "move"
+            : tool === "text"
+              ? "text"
+              : "crosshair"
     if (!el) return
     const brushSize = isPaintTool(tool)
       ? this.state.toolSettings[tool].size
@@ -1723,6 +1869,9 @@ export class PaintEngine {
       }
     }
     if (this.action || this.gesture) return
+    // A press outside text being edited finishes it rather than starting more.
+    const wasTyping = !!this.textEdit
+    this.commitText()
 
     const { tool } = this.state
     const id = e.pointerId
@@ -1743,6 +1892,12 @@ export class PaintEngine {
       this.pick(x, y)
     } else if (tool === "fill") {
       this.fillAt(x, y)
+    } else if (
+      tool === "shape" ||
+      tool === "text" ||
+      (tool === "move" && this.activeLayer()?.vector)
+    ) {
+      if (e.button === 0) this.beginVector(tool, id, x, y, sx, sy, !wasTyping)
     } else {
       const layer = this.activeLayer()
       if (!layer) return
@@ -1753,6 +1908,10 @@ export class PaintEngine {
       const onMask = this.state.editMask && !!layer.mask
       if (layer.fx && !(onMask || (tool === "move" && layer.mask))) {
         this.notify("Select a paint layer — adjustment layers hold no pixels")
+        return
+      }
+      if (layer.vector && !onMask) {
+        this.notify("Rasterise this vector layer to paint on it")
         return
       }
       if (tool === "move") {
@@ -1942,6 +2101,13 @@ export class PaintEngine {
         this.selBrushTo(a, x, y)
         break
       }
+      case "vec": {
+        if (!a.moved && Math.hypot(sx - a.sx, sy - a.sy) < 3) break
+        a.moved = true
+        const [x, y] = this.screenToDoc(sx, sy)
+        this.dragVector(a, x, y, e.shiftKey)
+        break
+      }
       case "stroke": {
         // Mice and fingers have no pressure, so derive some from speed.
         const target = clamp(1.15 - moved / 42, 0.3, 1)
@@ -2008,6 +2174,9 @@ export class PaintEngine {
         // The brush marks whole pixels; soften the stair-steps a little.
         this.finishShape(this.blurMask(a.stroke, 0.7), a.mode, false)
         break
+      case "vec":
+        this.finishVector(a)
+        break
       default:
         break
     }
@@ -2040,6 +2209,7 @@ export class PaintEngine {
     if (!a) return
     this.action = null
     if (a.kind === "selbrush") this.putSelection(a.base)
+    if (a.kind === "vec") this.restore(a.before)
     this.requestRender()
   }
 
@@ -2592,6 +2762,10 @@ export class PaintEngine {
       if (!cut) this.duplicateLayer(layer.id)
       return
     }
+    if (cut && layer.vector) {
+      this.notify("Rasterise this vector layer to cut pixels from it")
+      return
+    }
     this.structural(() => {
       const piece = this.bakedPixels(layer)
       const p = ctxOf(piece)
@@ -2692,7 +2866,13 @@ export class PaintEngine {
       this.setState({
         layers: this.state.layers.map((l) =>
           l.id === id
-            ? { ...l, mask: false, maskOff: false, rev: nextRev() }
+            ? {
+                ...l,
+                mask: false,
+                maskOff: false,
+                rev: nextRev(),
+                vector: undefined,
+              }
             : l
         ),
         editMask: false,
@@ -2727,6 +2907,605 @@ export class PaintEngine {
     this.setState({ editMask: on })
   }
 
+  // ---- vector objects ------------------------------------------------------
+
+  /** The vector object selected on the active layer, if any. */
+  selectedObject(): VectorObject | null {
+    return selectedObject(this.state)
+  }
+
+  private objectIn(layerId: string, objId: string): VectorObject | undefined {
+    return this.state.layers
+      .find((l) => l.id === layerId)
+      ?.vector?.find((o) => o.id === objId)
+  }
+
+  /** Redraws any vector layer whose canvas is out of date with its objects. */
+  private syncVector() {
+    const hide = this.textEdit?.objId ?? null
+    for (const l of this.state.layers) {
+      if (!l.vector) continue
+      const c = this.canvases.get(l.id)
+      if (!c) continue
+      const d = this.drawn.get(c)
+      if (d && d.objs === l.vector && d.hide === hide) continue
+      rasterize(c, l.vector, hide)
+      this.drawn.set(c, { objs: l.vector, hide })
+      this.loadFonts(l.vector)
+    }
+  }
+
+  /** Web fonts arrive late; re-measure and redraw text once they are in. */
+  private loadFonts(objects: VectorObject[]) {
+    for (const font of fontsUsed(objects)) {
+      if (this.fontsAsked.has(font)) continue
+      this.fontsAsked.add(font)
+      if (document.fonts.check(font)) continue
+      document.fonts.load(font).then(
+        () => {
+          this.drawn = new WeakMap()
+          this.setState({
+            layers: this.state.layers.map((l) =>
+              l.vector
+                ? {
+                    ...l,
+                    rev: nextRev(),
+                    vector: l.vector.map((o) =>
+                      o.type === "text" ? fitText(o) : o
+                    ),
+                  }
+                : l
+            ),
+          })
+          this.syncVector()
+          this.requestRender()
+        },
+        () => {}
+      )
+    }
+  }
+
+  private setObjects(
+    layerId: string,
+    objects: VectorObject[],
+    extra?: Partial<EngineState>
+  ) {
+    this.setState({
+      ...extra,
+      layers: this.state.layers.map((l) =>
+        l.id === layerId ? { ...l, vector: objects, rev: nextRev() } : l
+      ),
+    })
+    this.syncVector()
+    this.requestRender()
+  }
+
+  private patchObject(layerId: string, objId: string, next: VectorObject) {
+    const objs = this.state.layers.find((l) => l.id === layerId)?.vector
+    if (!objs) return
+    this.setObjects(
+      layerId,
+      objs.map((o) => (o.id === objId ? next : o))
+    )
+  }
+
+  /**
+   * Records a finished vector edit for undo. Rapid edits sharing a key (a
+   * slider drag, a run of nudges) collapse into one step.
+   */
+  private vecCommit(before: StructSnap, key = "") {
+    const after = this.snap()
+    const now = performance.now()
+    const e = this.vecEdit
+    if (
+      key &&
+      e &&
+      e.key === key &&
+      this.undoStack[this.undoStack.length - 1] === e.entry &&
+      now - e.at < 1200
+    ) {
+      e.after = after
+      e.at = now
+      this.scheduleSave()
+      return
+    }
+    const edit = { key, at: now, after, entry: null as unknown as UndoEntry }
+    edit.entry = {
+      undo: () => this.restore(before),
+      redo: () => this.restore(edit.after),
+    }
+    this.vecEdit = key ? edit : null
+    this.pushUndo(edit.entry)
+  }
+
+  /**
+   * Changes properties of the selected object — and of the style new objects
+   * of that kind are given. With nothing selected only the style changes.
+   */
+  setVectorProps(patch: VecPatch) {
+    const apply = <T extends object>(target: T): T => {
+      const out = { ...target } as Record<string, unknown>
+      for (const [k, v] of Object.entries(patch)) {
+        if (k in target && v !== undefined) out[k] = v
+      }
+      return out as T
+    }
+    const layer = this.activeLayer()
+    const obj = this.selectedObject()
+    if (obj && layer) {
+      this.cancelAction()
+      this.commitText()
+      const before = this.snap()
+      const next = apply(obj)
+      this.patchObject(
+        layer.id,
+        obj.id,
+        next.type === "text" ? fitText(next) : normalizeShape(next)
+      )
+      this.vecCommit(before, `${obj.id}:${Object.keys(patch).join()}`)
+    }
+    const forText = obj ? obj.type === "text" : this.state.tool === "text"
+    if (forText) this.setState({ textStyle: apply(this.state.textStyle) })
+    else this.setState({ shapeStyle: apply(this.state.shapeStyle) })
+  }
+
+  /** Picks the shape the shape tool draws, and switches to that tool. */
+  setShapeKind(shape: ShapeKind) {
+    this.commitText()
+    this.setState({
+      tool: "shape",
+      vecSel: null,
+      shapeStyle: { ...this.state.shapeStyle, shape },
+    })
+    this.styleFromColor()
+    this.requestRender()
+    this.updateCursor()
+  }
+
+  /**
+   * Chooses whether the colour panel drives the fill or the stroke, and
+   * shows that paint's colour there.
+   */
+  setVecPaint(target: "fill" | "stroke") {
+    const s = this.state
+    const style =
+      this.selectedObject() ?? (s.tool === "text" ? s.textStyle : s.shapeStyle)
+    const hex = style[target]
+    const hsv = hex ? hexToHsv(hex, s.color.h) : null
+    this.setState(hsv ? { vecPaint: target, color: hsv } : { vecPaint: target })
+  }
+
+  /** Sends a colour picked in the colour panel to the selected object. */
+  private colorToVector() {
+    const { tool, vecPaint, shapeStyle } = this.state
+    const obj = this.selectedObject()
+    if (tool !== "shape" && tool !== "text" && !(tool === "move" && obj)) return
+    const line = obj
+      ? isLine(obj)
+      : tool === "shape" &&
+        (shapeStyle.shape === "line" || shapeStyle.shape === "arrow")
+    this.setVectorProps({ [line ? "stroke" : vecPaint]: hsvToHex(this.state.color) })
+  }
+
+  private hitVector(
+    tool: ToolId,
+    x: number,
+    y: number
+  ): { layer: LayerMeta; obj: VectorObject } | null {
+    const tol = 5 / this.view.scale
+    const active = this.activeLayer()
+    const find = (l: LayerMeta | undefined, textOnly: boolean) => {
+      if (!l?.vector || !l.visible) return null
+      for (let i = l.vector.length - 1; i >= 0; i--) {
+        const obj = l.vector[i]
+        if (textOnly && obj.type !== "text") continue
+        if (hitObject(obj, x, y, tol)) return { layer: l, obj }
+      }
+      return null
+    }
+    if (tool === "move") return find(active, false)
+    if (tool === "shape") {
+      // The shape tool draws; it only grabs the object it just made.
+      const sel = this.selectedObject()
+      return sel && active && hitObject(sel, x, y, tol)
+        ? { layer: active, obj: sel }
+        : null
+    }
+    // The text tool reaches text on any layer, topmost first.
+    const own = find(active, true)
+    if (own) return own
+    const { layers } = this.state
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const hit = find(layers[i], true)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  private beginVector(
+    tool: ToolId,
+    pointerId: number,
+    x: number,
+    y: number,
+    sx: number,
+    sy: number,
+    canDraw: boolean
+  ) {
+    const layer = this.activeLayer()
+    const base = { kind: "vec" as const, pointerId, x0: x, y0: y, sx, sy, moved: false }
+
+    const sel = this.selectedObject()
+    if (sel && layer?.visible) {
+      const handle = hitHandle(sel, x, y, this.view.scale)
+      if (handle) {
+        this.action = {
+          ...base,
+          mode: handle.kind === "rotate" ? "rotate" : "resize",
+          handle,
+          layerId: layer.id,
+          objId: sel.id,
+          orig: sel,
+          before: this.snap(),
+          edit: false,
+        }
+        return
+      }
+    }
+
+    const hit = this.hitVector(tool, x, y)
+    if (hit) {
+      const { obj } = hit
+      const now = performance.now()
+      const again = this.lastVecDown.id === obj.id && now - this.lastVecDown.t < 400
+      this.lastVecDown = { id: obj.id, t: now }
+      const before = this.snap()
+      if (obj.id !== this.state.vecSel || hit.layer.id !== this.state.activeLayerId) {
+        this.setState({
+          activeLayerId: hit.layer.id,
+          editMask: false,
+          vecSel: obj.id,
+          vecPaint: obj.fill || !obj.stroke ? "fill" : "stroke",
+        })
+      }
+      this.action = {
+        ...base,
+        mode: "move",
+        layerId: hit.layer.id,
+        objId: obj.id,
+        orig: obj,
+        before,
+        edit: obj.type === "text" && (tool === "text" || again),
+      }
+      this.requestRender()
+      return
+    }
+
+    if (tool === "move" || !canDraw) {
+      if (this.state.vecSel) this.setState({ vecSel: null })
+      this.requestRender()
+      return
+    }
+
+    // Draw a new object, on a new vector layer if the active one isn't one.
+    const before = this.snap()
+    let layerId = layer?.id ?? ""
+    if (!layer?.vector || !layer.visible) {
+      const { layers, activeLayerId, docW, docH } = this.state
+      const made: LayerMeta = {
+        ...this.makeLayer(`Vector ${this.layerCounter + 1}`),
+        vector: [],
+      }
+      this.canvases.set(made.id, makeCanvas(docW, docH))
+      const next = layers.slice()
+      next.splice(layers.findIndex((l) => l.id === activeLayerId) + 1, 0, made)
+      this.setState({ layers: next, activeLayerId: made.id, editMask: false })
+      layerId = made.id
+    }
+    const { shapeStyle, textStyle, vecPaint } = this.state
+    const hex = hsvToHex(this.state.color)
+    const style = tool === "text" ? textStyle : shapeStyle
+    const paint = { fill: style.fill, stroke: style.stroke }
+    if (paint[vecPaint] !== null) paint[vecPaint] = hex
+    if (!paint.fill && !paint.stroke) paint.fill = hex
+    if (tool === "shape" && (shapeStyle.shape === "line" || shapeStyle.shape === "arrow")) {
+      paint.stroke = hex
+    }
+    const obj: VectorObject =
+      tool === "text"
+        ? makeText({ ...textStyle, ...paint }, x, y)
+        : makeShape({ ...shapeStyle, ...paint }, x, y)
+    this.rememberColor()
+    const objs = this.state.layers.find((l) => l.id === layerId)?.vector ?? []
+    this.setObjects(layerId, [...objs, obj], { vecSel: obj.id })
+    this.action = {
+      ...base,
+      mode: "draw",
+      layerId,
+      objId: obj.id,
+      orig: obj,
+      before,
+      edit: false,
+    }
+  }
+
+  private dragVector(
+    a: Extract<Action, { kind: "vec" }>,
+    x: number,
+    y: number,
+    constrain: boolean
+  ) {
+    const o = a.orig
+    const dx = x - a.x0
+    const dy = y - a.y0
+    let next: VectorObject = o
+    if (a.mode === "draw") {
+      if (isLine(o)) {
+        next = dragHandle(
+          { ...o, x: a.x0, y: a.y0, w: 0, h: 0 },
+          { id: "end", hx: 1, hy: 1, x: 0, y: 0, kind: "resize" },
+          x,
+          y,
+          constrain
+        )
+      } else {
+        let w = Math.abs(dx)
+        let h = Math.abs(dy)
+        if (constrain) w = h = Math.max(w, h)
+        const box = { x: dx < 0 ? a.x0 - w : a.x0, y: dy < 0 ? a.y0 - h : a.y0, w, h }
+        next = o.type === "text" ? { ...o, ...box, wrap: true } : { ...o, ...box }
+      }
+    } else if (a.mode === "move") {
+      let mx = dx
+      let my = dy
+      if (constrain) {
+        if (Math.abs(mx) > Math.abs(my)) my = 0
+        else mx = 0
+      }
+      next = { ...o, x: o.x + mx, y: o.y + my }
+    } else if (a.mode === "resize" && a.handle) {
+      next = dragHandle(o, a.handle, x, y, constrain)
+    } else if (a.mode === "rotate") {
+      let ang = Math.atan2(y - (o.y + o.h / 2), x - (o.x + o.w / 2)) + Math.PI / 2
+      if (constrain) ang = Math.round(ang / (Math.PI / 12)) * (Math.PI / 12)
+      next = { ...o, rot: ang }
+    }
+    this.patchObject(a.layerId, a.objId, next)
+  }
+
+  private finishVector(a: Extract<Action, { kind: "vec" }>) {
+    const obj = this.objectIn(a.layerId, a.objId)
+    if (!obj) return
+    if (a.mode === "draw") {
+      if (obj.type === "text") {
+        // A click makes text that grows as you type; a drag makes a box it wraps in.
+        if (a.moved) {
+          this.patchObject(
+            a.layerId,
+            a.objId,
+            fitText({ ...obj, wrap: true, w: Math.max(obj.w, obj.size) })
+          )
+        }
+        this.beginTextEdit(a.layerId, a.objId, a.before, null)
+      } else if (!a.moved || Math.hypot(obj.w, obj.h) < 2) {
+        this.restore(a.before)
+        this.setState({ vecSel: null })
+      } else {
+        this.vecCommit(a.before)
+      }
+      return
+    }
+    if (a.moved) this.vecCommit(a.before)
+    else if (a.edit && obj.type === "text") {
+      this.beginTextEdit(a.layerId, a.objId, a.before, obj.text)
+    }
+  }
+
+  // ---- live text -------------------------------------------------------------
+
+  private beginTextEdit(
+    layerId: string,
+    objId: string,
+    before: StructSnap,
+    initial: string | null
+  ) {
+    this.textEdit = { layerId, objId, before, initial }
+    this.setState({ activeLayerId: layerId, vecSel: objId, textEditing: true })
+    this.syncVector()
+    this.requestRender()
+  }
+
+  /** Starts typing into the selected text object. */
+  editSelectedText(): boolean {
+    const obj = this.selectedObject()
+    if (!obj || obj.type !== "text" || this.textEdit || this.action) return false
+    this.beginTextEdit(this.state.activeLayerId, obj.id, this.snap(), obj.text)
+    return true
+  }
+
+  /** Called as the user types in the on-canvas editor. */
+  setEditingText(text: string) {
+    const te = this.textEdit
+    if (!te) return
+    const obj = this.objectIn(te.layerId, te.objId)
+    if (!obj || obj.type !== "text") return
+    this.patchObject(te.layerId, te.objId, fitText({ ...obj, text }))
+  }
+
+  /** Ends text editing, keeping what was typed. Empty text is removed. */
+  commitText() {
+    const te = this.textEdit
+    if (!te) return
+    this.textEdit = null
+    this.setState({ textEditing: false })
+    const obj = this.objectIn(te.layerId, te.objId)
+    if (!obj || obj.type !== "text" || !obj.text.trim()) {
+      if (te.initial === null) {
+        // Nothing was typed into a new object: as if it never happened.
+        this.restore(te.before)
+      } else if (obj) {
+        const objs = this.state.layers.find((l) => l.id === te.layerId)?.vector ?? []
+        this.setObjects(
+          te.layerId,
+          objs.filter((o) => o.id !== te.objId),
+          { vecSel: null }
+        )
+        this.vecCommit(te.before)
+      }
+    } else if (obj.text !== te.initial) {
+      this.syncVector()
+      this.vecCommit(te.before)
+    }
+    this.syncVector()
+    this.requestRender()
+  }
+
+  /** The textarea laid over the canvas while text is being edited. */
+  attachTextEditor(el: HTMLTextAreaElement | null) {
+    this.textEl = el
+    this.placeTextEditor()
+  }
+
+  /** Keeps the on-canvas editor exactly over the text it edits. */
+  private placeTextEditor() {
+    const el = this.textEl
+    const te = this.textEdit
+    if (!el || !te) return
+    const o = this.objectIn(te.layerId, te.objId)
+    if (!o || o.type !== "text") return
+    const { tx, ty, scale, rot } = this.view
+    const c = Math.cos(rot) * scale
+    const s = Math.sin(rot) * scale
+    // Text that grows as it is typed needs room for the caret past its end.
+    const pad = o.wrap ? 0 : o.size
+    const ax = o.align === "center" ? 0.5 : o.align === "right" ? 1 : 0
+    el.style.width = `${o.w + pad}px`
+    el.style.height = `${o.h + o.size * o.lineHeight}px`
+    el.style.transform =
+      `matrix(${c},${s},${-s},${c},${tx},${ty}) ` +
+      `translate(${o.x + o.w / 2}px,${o.y + o.h / 2}px) rotate(${o.rot}rad) ` +
+      `translate(${-o.w / 2 - pad * ax}px,${-o.h / 2}px)`
+  }
+
+  // ---- object commands -------------------------------------------------------
+
+  /** Applies a change to the active layer's object list as one undo step. */
+  private editObjects(
+    fn: (objs: VectorObject[], obj: VectorObject) => VectorObject[] | null,
+    sel?: (obj: VectorObject) => string | null,
+    key?: (obj: VectorObject) => string
+  ): boolean {
+    const layer = this.activeLayer()
+    const obj = this.selectedObject()
+    if (!layer?.vector || !obj) return false
+    this.cancelAction()
+    this.commitText()
+    const before = this.snap()
+    const next = fn(layer.vector, obj)
+    if (!next) return false
+    this.setObjects(layer.id, next, sel ? { vecSel: sel(obj) } : undefined)
+    this.vecCommit(before, key?.(obj))
+    return true
+  }
+
+  deleteObject() {
+    this.editObjects(
+      (objs, obj) => objs.filter((o) => o !== obj),
+      () => null
+    )
+  }
+
+  duplicateObject() {
+    const id = uid("obj")
+    this.editObjects(
+      (objs, obj) => {
+        const next = objs.slice()
+        next.splice(objs.indexOf(obj) + 1, 0, { ...obj, id, x: obj.x + 24, y: obj.y + 24 })
+        return next
+      },
+      () => id
+    )
+  }
+
+  /** Moves the selected object one step forward (1) or back (-1) in its layer. */
+  orderObject(dir: 1 | -1) {
+    this.editObjects((objs, obj) => {
+      const i = objs.indexOf(obj)
+      const to = i + dir
+      if (to < 0 || to >= objs.length) return null
+      const next = objs.slice()
+      next.splice(i, 1)
+      next.splice(to, 0, obj)
+      return next
+    })
+  }
+
+  nudgeObject(dx: number, dy: number): boolean {
+    if (!isVectorTool(this.state.tool)) return false
+    return this.editObjects(
+      (objs, obj) =>
+        objs.map((o) => (o === obj ? { ...o, x: o.x + dx, y: o.y + dy } : o)),
+      undefined,
+      (obj) => `${obj.id}:nudge`
+    )
+  }
+
+  /** Turns a vector layer into ordinary pixels; its objects stop being editable. */
+  rasterizeLayer(id: string) {
+    const meta = this.state.layers.find((l) => l.id === id)
+    const src = this.canvases.get(id)
+    if (!meta?.vector || !src) return
+    this.structural(() => {
+      this.canvases.set(id, cloneCanvas(src))
+      this.setState({
+        layers: this.state.layers.map((l) =>
+          l.id === id ? { ...l, vector: undefined, rev: nextRev() } : l
+        ),
+        vecSel: null,
+      })
+    })
+  }
+
+  /** The outline and handles of the selected object. */
+  private drawVecOverlay(ctx: CanvasRenderingContext2D) {
+    const o = this.selectedObject()
+    if (!o || !isVectorTool(this.state.tool)) return
+    const scale = this.view.scale
+    const px = 1 / scale
+    const a = this.action
+    ctx.save()
+    ctx.translate(o.x + o.w / 2, o.y + o.h / 2)
+    ctx.rotate(o.rot)
+    ctx.setLineDash([])
+    ctx.lineWidth = 1.5 * px
+    ctx.strokeStyle = "#2f8cff"
+    ctx.fillStyle = "#fff"
+    ctx.beginPath()
+    if (isLine(o)) {
+      ctx.moveTo(-o.w / 2, -o.h / 2)
+      ctx.lineTo(o.w / 2, o.h / 2)
+    } else {
+      ctx.rect(-o.w / 2, -o.h / 2, o.w, o.h)
+    }
+    ctx.stroke()
+    if (!this.textEdit && !(a?.kind === "vec" && a.mode === "draw")) {
+      for (const h of handlesOf(o, scale)) {
+        ctx.beginPath()
+        if (h.kind === "rotate") {
+          ctx.moveTo(0, -o.h / 2)
+          ctx.lineTo(h.x, h.y)
+          ctx.stroke()
+          ctx.beginPath()
+          ctx.arc(h.x, h.y, 5 * px, 0, Math.PI * 2)
+        } else {
+          ctx.rect(h.x - 4 * px, h.y - 4 * px, 8 * px, 8 * px)
+        }
+        ctx.fill()
+        ctx.stroke()
+      }
+    }
+    ctx.restore()
+  }
+
   // ---- keys ----------------------------------------------------------------
 
   /** Escape: abandons a selection shape in progress. */
@@ -2737,8 +3516,13 @@ export class PaintEngine {
       return true
     }
     const k = this.action?.kind
-    if (k === "marquee" || k === "lasso" || k === "selbrush") {
+    if (k === "marquee" || k === "lasso" || k === "selbrush" || k === "vec") {
       this.cancelAction()
+      return true
+    }
+    if (this.selectedObject()) {
+      this.setState({ vecSel: null })
+      this.requestRender()
       return true
     }
     return false
@@ -2751,6 +3535,8 @@ export class PaintEngine {
       p.pts.length -= 2
       if (p.pts.length === 0) this.poly = null
       this.requestRender()
+    } else if (this.selectedObject() && isVectorTool(this.state.tool)) {
+      this.deleteObject()
     } else if (this.selection) {
       this.clearSelection()
     }
@@ -2851,6 +3637,10 @@ export class PaintEngine {
       this.notify("Select a paint layer — adjustment layers hold no pixels")
       return
     }
+    if (layer.vector) {
+      this.notify("Rasterise this vector layer to fill it")
+      return
+    }
     const sel = this.selection
     const rgb = hexToRgb(hsvToHex(this.state.color))
     if (!rgb) return
@@ -2941,6 +3731,7 @@ export class PaintEngine {
 
   exportPNG(): Promise<Blob | null> {
     this.cancelAction()
+    this.commitText()
     const { docW, docH, background, showBackground } = this.state
     const out = makeCanvas(docW, docH)
     const ctx = ctxOf(out)
@@ -2959,14 +3750,14 @@ export class PaintEngine {
   }
 
   private async save() {
-    if (this.action || this.settling) {
+    if (this.action || this.settling || this.textEdit) {
       this.scheduleSave()
       return
     }
     const s = this.state
     const blobs: Record<string, Blob> = {}
     for (const meta of s.layers) {
-      if (meta.fx) continue
+      if (meta.fx || meta.vector) continue
       const cached = this.blobCache.get(meta.id)
       if (cached && cached.rev === meta.rev) {
         blobs[meta.id] = cached.blob
