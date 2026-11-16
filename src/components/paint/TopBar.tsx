@@ -11,6 +11,7 @@ import {
   SubtractIcon,
   UniteIcon,
   CompassIcon,
+  CompassToolIcon,
   DownloadSimpleIcon,
   FilePlusIcon,
   FlipHorizontalIcon,
@@ -20,7 +21,6 @@ import {
   MinusIcon,
   PlusIcon,
   SidebarSimpleIcon,
-  SplitHorizontalIcon,
   SquaresFourIcon,
 } from "@phosphor-icons/react"
 import { useRef, useState } from "react"
@@ -67,7 +67,7 @@ const SHORTCUTS: [string, string][] = [
   ["Scroll", "Zoom"],
   ["R + drag / Shift + scroll", "Rotate canvas"],
   ["F", "Fit canvas"],
-  ["M", "Symmetry"],
+  ["M", "Symmetry on / off"],
   ["Ctrl Z / Ctrl Shift Z", "Undo / redo"],
   ["Tab", "Hide panels"],
   ["Two-finger tap", "Undo (touch)"],
@@ -407,6 +407,7 @@ const VIEW_PANELS: [ViewItem, string][] = [
   ["color", "Colour"],
   ["options", "Brushes & tool options"],
   ["layers", "Layers"],
+  ["aids", "Drawing aids"],
 ]
 
 const VIEW_CONTROLS: [ViewItem, string][] = [
@@ -599,6 +600,7 @@ export function TopBar({
 }) {
   const s = useEngine()
   const { hidden } = useLayout()
+  const aidsOpen = panelsOpen && !hidden.aids
   const fileRef = useRef<HTMLInputElement>(null)
   const [menu, setMenu] = useState<"new" | "keys" | "select" | "view" | null>(null)
   const degrees = Math.round((((s.rotation * 180) / Math.PI) % 360 + 540) % 360 - 180)
@@ -724,8 +726,18 @@ export function TopBar({
       <div className={cn(panelClass, "pointer-events-auto relative flex h-12 items-center gap-0.5 px-2")}>
         {!hidden.viewControls && (
           <>
-            <IconButton label="Symmetry (M)" active={s.symmetry} onClick={() => engine.setSymmetry(!s.symmetry)}>
-              <SplitHorizontalIcon />
+            <IconButton
+              label="Drawing aids — symmetry, guides, 3D reference"
+              active={aidsOpen}
+              onClick={() => {
+                if (aidsOpen) layout.toggle("aids")
+                else {
+                  if (hidden.aids) layout.toggle("aids")
+                  onShowPanels()
+                }
+              }}
+            >
+              <CompassToolIcon />
             </IconButton>
             <button
               type="button"

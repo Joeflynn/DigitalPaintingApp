@@ -40,7 +40,7 @@ import {
   saveProject,
   type SavedDoc,
 } from "./storage"
-import { Stroke, type SampleExtra } from "./stroke"
+import { Stroke, type DabTransform, type SampleExtra } from "./stroke"
 import {
   DEFAULT_SHAPE_STYLE,
   DEFAULT_TEXT_STYLE,
@@ -220,7 +220,6 @@ export interface EngineState extends SelectOptions {
   color: HSV
   prevColor: HSV
   recentColors: string[]
-  symmetry: boolean
   fillTolerance: number
   canUndo: boolean
   canRedo: boolean
@@ -372,6 +371,17 @@ function defaultSettings(
   }
 }
 
+/** The view a frame was drawn with: document → screen is rotate, scale, then offset. */
+export interface FrameInfo {
+  tx: number
+  ty: number
+  scale: number
+  rot: number
+  dpr: number
+  docW: number
+  docH: number
+}
+
 export class PaintEngine {
   private state: EngineState = {
     ready: false,
@@ -391,7 +401,6 @@ export class PaintEngine {
     color: { h: 18, s: 0.78, v: 0.2 },
     prevColor: { h: 12, s: 0.72, v: 0.86 },
     recentColors: [],
-    symmetry: false,
     fillTolerance: 40,
     canUndo: false,
     canRedo: false,
@@ -527,6 +536,8 @@ export class PaintEngine {
   private layerCounter = 0
   private noticeId = 0
   private saveTimer = 0
+  private overlays = new Set<(ctx: CanvasRenderingContext2D, frame: FrameInfo) => void>()
+  private symmetrySource: ((docW: number, docH: number) => DabTransform[]) | null = null
   /** Tail of the chain of saves, so they never overlap. */
   private saving: Promise<void> = Promise.resolve()
   private blobCache = new Map<string, { rev: number; blob: Blob }>()
@@ -1356,9 +1367,20 @@ export class PaintEngine {
     })
   }
 
-  setSymmetry(on: boolean) {
-    this.setState({ symmetry: on })
-    this.requestRender()
+  /**
+   * Adds something drawn over the picture on screen only (guides, references).
+   * It is called in document space after the layers; exports never include it.
+   */
+  addOverlay(draw: (ctx: CanvasRenderingContext2D, frame: FrameInfo) => void) {
+    this.overlays.add(draw)
+    return () => {
+      this.overlays.delete(draw)
+    }
+  }
+
+  /** Where each new stroke asks for its symmetry copies. */
+  setSymmetrySource(source: ((docW: number, docH: number) => DabTransform[]) | null) {
+    this.symmetrySource = source
   }
 
   setFillTolerance(v: number) {
@@ -1811,7 +1833,7 @@ export class PaintEngine {
       if (this.state.liqTool !== "push") this.requestRender()
     }
     const ctx = ctxOf(canvas)
-    const { docW, docH, background, showBackground, symmetry } = this.state
+    const { docW, docH, background, showBackground } = this.state
     const { tx, ty, scale, rot } = this.view
     const d = this.dpr
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -1846,15 +1868,13 @@ export class PaintEngine {
     else this.drawLayers(ctx)
     ctx.restore()
 
-    if (symmetry) {
-      ctx.lineWidth = 1.5 / (scale * d)
-      ctx.setLineDash([8 / scale, 6 / scale])
-      ctx.strokeStyle = "rgba(56, 189, 148, 0.9)"
-      ctx.beginPath()
-      ctx.moveTo(docW / 2, 0)
-      ctx.lineTo(docW / 2, docH)
-      ctx.stroke()
-      ctx.setLineDash([])
+    if (this.overlays.size > 0) {
+      const frame: FrameInfo = { tx, ty, scale, rot, dpr: d, docW, docH }
+      for (const draw of this.overlays) {
+        ctx.save()
+        draw(ctx, frame)
+        ctx.restore()
+      }
     }
 
     this.drawOverlay(ctx, canvas)
@@ -2199,7 +2219,7 @@ export class PaintEngine {
     const stroke = new Stroke((dab) => gpu.dab(dab), brush, {
       size: settings.size,
       streamline: settings.streamline,
-      mirrorX: this.state.symmetry ? this.state.docW / 2 : null,
+      symmetry: this.symmetrySource?.(this.state.docW, this.state.docH) ?? [],
     })
     stroke.add(x, y, p, extra)
     this.action = {

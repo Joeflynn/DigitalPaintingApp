@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils"
  * stretches to keep filling that space.
  */
 
-export type PanelId = "tools" | "color" | "options" | "layers"
+export type PanelId = "tools" | "color" | "options" | "layers" | "aids"
 export type ControlId = "context" | "viewControls"
 export type ViewItem = PanelId | ControlId
 
@@ -23,7 +23,7 @@ const GAP = 8
 const TOP = 76
 const SNAP = 10
 const KEY = "pigment.layout.v1"
-const PANEL_IDS: PanelId[] = ["tools", "color", "options", "layers"]
+const PANEL_IDS: PanelId[] = ["tools", "color", "options", "layers", "aids"]
 
 interface Placement {
   /** Horizontal anchor edge and the distance to it. */
@@ -64,9 +64,11 @@ function defaults(): LayoutState {
       color: { ...side, ay: "t", t: TOP, h: colorH, tight: true },
       options: { ...side, ay: "t", t: optionsT, h: optionsH },
       layers: { ...side, ay: "s", t: optionsT + optionsH + GAP, h: 200 },
+      aids: { ax: "l", x: 70, ay: "t", t: TOP, b: MARGIN, w: 280, h: Math.min(560, vh - TOP - MARGIN), tight: true },
     },
     order: [...PANEL_IDS],
-    hidden: {},
+    // Drawing aids stay out of the way until asked for.
+    hidden: { aids: true },
     guides: null,
   }
 }
@@ -77,15 +79,17 @@ function load(): LayoutState {
     const ok =
       raw?.panels &&
       Array.isArray(raw.order) &&
-      PANEL_IDS.every((id) => {
-        const p = raw.panels?.[id]
-        return p && [p.x, p.t, p.b, p.w, p.h].every(Number.isFinite) && raw.order?.includes(id)
-      })
+      Object.values(raw.panels).every((p) => p && [p.x, p.t, p.b, p.w, p.h].every(Number.isFinite))
     if (ok) {
+      // Panels added since this layout was saved start hidden, in their default spot.
+      const base = defaults()
+      const added = PANEL_IDS.filter((id) => !raw.panels![id])
+      const hidden = { ...raw.hidden }
+      for (const id of added) hidden[id] = base.hidden[id] ?? true
       return {
-        panels: raw.panels!,
-        order: raw.order!,
-        hidden: raw.hidden ?? {},
+        panels: { ...base.panels, ...raw.panels },
+        order: [...raw.order!.filter((id) => PANEL_IDS.includes(id)), ...PANEL_IDS.filter((id) => !raw.order!.includes(id))],
+        hidden,
         colorExpanded: !!raw.colorExpanded,
         guides: null,
       }

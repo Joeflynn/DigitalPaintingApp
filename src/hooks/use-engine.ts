@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react"
 
+import { aids } from "@/paint/aids"
 import { engine, type EngineState } from "@/paint/engine"
 
 export function useEngine(): EngineState {
@@ -88,7 +89,6 @@ export function useShortcuts(togglePanels: () => void) {
       }
       if (e.repeat && key !== "[" && key !== "]") return
 
-      const s = engine.getState()
       switch (key) {
         case "b":
           engine.setTool("brush")
@@ -144,7 +144,7 @@ export function useShortcuts(togglePanels: () => void) {
           engine.swapColors()
           break
         case "m":
-          engine.setSymmetry(!s.symmetry)
+          aids.toggleSymmetry()
           break
         case "f":
           engine.fit()

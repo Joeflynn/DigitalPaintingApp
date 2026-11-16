@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 
+import { AidsOverlay } from "@/components/paint/AidsOverlay"
+import { AidsPanel } from "@/components/paint/AidsPanel"
 import { BrushPanel } from "@/components/paint/BrushPanel"
 import { BrushStudio } from "@/components/paint/BrushStudio"
 import { CanvasView } from "@/components/paint/CanvasView"
@@ -65,6 +67,7 @@ export function App() {
   return (
     <div className="relative h-svh w-screen overflow-hidden bg-[radial-gradient(ellipse_at_center,oklch(0.24_0.008_107),oklch(0.15_0.006_107))] text-foreground select-none">
       <CanvasView />
+      <AidsOverlay />
       <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} onOpenGallery={openGallery} />
 
       {panelsOpen && (
@@ -97,6 +100,11 @@ export function App() {
           {!hidden.layers && (
             <PanelFrame id="layers" label="Layers" minW={260}>
               <LayersPanel />
+            </PanelFrame>
+          )}
+          {!hidden.aids && (
+            <PanelFrame id="aids" label="Drawing aids" minW={250} minH={240}>
+              <AidsPanel />
             </PanelFrame>
           )}
           <SnapGuides />

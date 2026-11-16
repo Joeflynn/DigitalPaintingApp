@@ -65,12 +65,28 @@ export interface SampleExtra {
   time?: number
 }
 
+/**
+ * A rigid copy of the stroke used for symmetry: the point goes through the
+ * affine map, and a tip angle becomes `ang - angle` when the map is a
+ * reflection or `angle + ang` when it is a rotation.
+ */
+export interface DabTransform {
+  a: number
+  b: number
+  c: number
+  d: number
+  e: number
+  f: number
+  flip: boolean
+  ang: number
+}
+
 export interface StrokeOptions {
   size: number
   /** 0–1 stabilisation */
   streamline: number
-  /** If set, every dab is mirrored across this vertical axis (document x). */
-  mirrorX?: number | null
+  /** Every dab is repeated through each of these, for symmetry painting. */
+  symmetry?: DabTransform[]
   seed?: number
 }
 
@@ -102,7 +118,7 @@ export class Stroke {
   private brush: BrushPreset
   private size: number
   private streamline: number
-  private mirrorX: number | null
+  private symmetry: DabTransform[]
   private rand: () => number
 
   private pts: Pt[] = []
@@ -124,7 +140,7 @@ export class Stroke {
     this.brush = brush
     this.size = opts.size
     this.streamline = opts.streamline
-    this.mirrorX = opts.mirrorX ?? null
+    this.symmetry = opts.symmetry ?? []
     this.rand = mulberry32(opts.seed ?? (Math.random() * 1e9) | 0)
     this.links = (brush.links ?? []).filter((l) => l.amount !== 0)
     const r = this.rand
@@ -352,10 +368,17 @@ export class Stroke {
     }
     this.sink(dab)
     this.dirty = growRect(this.dirty, x, y, size / 2 + 2)
-    if (this.mirrorX !== null) {
-      const mx = 2 * this.mirrorX - x
-      this.sink({ ...dab, x: mx, angle: Math.PI - angle, dir: Math.PI - dir })
-      this.dirty = growRect(this.dirty, mx, y, size / 2 + 2)
+    for (const t of this.symmetry) {
+      const mx = t.a * x + t.c * y + t.e
+      const my = t.b * x + t.d * y + t.f
+      this.sink({
+        ...dab,
+        x: mx,
+        y: my,
+        angle: t.flip ? t.ang - angle : angle + t.ang,
+        dir: t.flip ? t.ang - dir : dir + t.ang,
+      })
+      this.dirty = growRect(this.dirty, mx, my, size / 2 + 2)
     }
   }
 }
