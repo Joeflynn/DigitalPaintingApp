@@ -21,6 +21,7 @@ import {
   PlusIcon,
   SidebarSimpleIcon,
   SplitHorizontalIcon,
+  SquaresFourIcon,
 } from "@phosphor-icons/react"
 import { useRef, useState } from "react"
 import type { ReactNode } from "react"
@@ -96,7 +97,7 @@ function Divider() {
   return <div className="mx-1 h-5 w-px shrink-0 bg-white/10" />
 }
 
-function NewCanvasMenu({ onDone }: { onDone: () => void }) {
+export function NewCanvasMenu({ onDone }: { onDone: () => void }) {
   const [w, setW] = useState(2000)
   const [h, setH] = useState(1400)
   const valid = w >= 16 && h >= 16 && w <= 4096 && h <= 4096
@@ -145,13 +146,13 @@ function NewCanvasMenu({ onDone }: { onDone: () => void }) {
         px
       </div>
       <p className="text-[11px] leading-snug text-muted-foreground">
-        This replaces the current painting. Export it first if you want to keep it.
+        Starts a new painting. Everything else stays in the gallery.
       </p>
       <button
         type="button"
         disabled={!valid}
         onClick={() => {
-          engine.newDocument(Math.round(w), Math.round(h))
+          void engine.createProject(Math.round(w), Math.round(h))
           onDone()
         }}
         className="h-8 rounded-lg bg-primary text-xs font-semibold text-primary-foreground outline-none hover:bg-primary/85 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
@@ -589,10 +590,12 @@ export function TopBar({
   panelsOpen,
   onTogglePanels,
   onShowPanels,
+  onOpenGallery,
 }: {
   panelsOpen: boolean
   onTogglePanels: () => void
   onShowPanels: () => void
+  onOpenGallery: () => void
 }) {
   const s = useEngine()
   const { hidden } = useLayout()
@@ -626,10 +629,15 @@ export function TopBar({
   return (
     <div className="pointer-events-none absolute inset-x-3 top-3 z-30 flex items-start justify-between gap-2">
       <div className={cn(panelClass, "pointer-events-auto relative flex h-12 items-center gap-0.5 px-2")}>
-        <div className="mr-1 flex items-center gap-2 pr-1 pl-1.5">
-          <span className="size-4 rounded-full bg-[conic-gradient(from_210deg,#e5533d,#f6c445,#3f9d5a,#4aa3df,#7a4fc4,#e5533d)]" />
-          <span className="text-sm font-semibold tracking-tight">Pigment</span>
-        </div>
+        <button
+          type="button"
+          title="Open the gallery"
+          onClick={onOpenGallery}
+          className="mr-0.5 flex h-9 items-center gap-1.5 rounded-xl px-2 text-xs font-medium text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-[18px]"
+        >
+          <SquaresFourIcon />
+          Gallery
+        </button>
         <Divider />
         <IconButton label="New canvas" data-popover active={menu === "new"} onClick={() => setMenu(menu === "new" ? null : "new")}>
           <FilePlusIcon />

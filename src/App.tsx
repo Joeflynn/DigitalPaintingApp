@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react"
 import { BrushPanel } from "@/components/paint/BrushPanel"
 import { BrushStudio } from "@/components/paint/BrushStudio"
 import { CanvasView } from "@/components/paint/CanvasView"
+import { Gallery } from "@/components/paint/Gallery"
 import { ColorPanel } from "@/components/paint/ColorPanel"
 import { DistortPanel } from "@/components/paint/DistortPanel"
 import { panelClass } from "@/components/paint/controls"
@@ -31,7 +32,7 @@ function Toast() {
       role="status"
       className={cn(
         panelClass,
-        "pointer-events-none absolute bottom-5 left-1/2 z-40 -translate-x-1/2 px-4 py-2 text-xs text-foreground"
+        "pointer-events-none absolute bottom-5 left-1/2 z-[70] -translate-x-1/2 px-4 py-2 text-xs text-foreground"
       )}
     >
       {notice.text}
@@ -45,6 +46,9 @@ export function App() {
   const showPanels = useCallback(() => setPanelsOpen(true), [])
   const [studio, setStudio] = useState(false)
   const closeStudio = useCallback(() => setStudio(false), [])
+  const [gallery, setGallery] = useState(false)
+  const openGallery = useCallback(() => setGallery(true), [])
+  const closeGallery = useCallback(() => setGallery(false), [])
   const state = useEngine()
   const { tool } = state
   const vector = tool === "shape" || tool === "text" || !!selectedObject(state)
@@ -61,7 +65,7 @@ export function App() {
   return (
     <div className="relative h-svh w-screen overflow-hidden bg-[radial-gradient(ellipse_at_center,oklch(0.24_0.008_107),oklch(0.15_0.006_107))] text-foreground select-none">
       <CanvasView />
-      <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} />
+      <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} onOpenGallery={openGallery} />
 
       {panelsOpen && (
         <>
@@ -104,6 +108,8 @@ export function App() {
           onClose={closeStudio}
         />
       )}
+      {/* With no project open there is nothing to paint on, so the gallery stays up. */}
+      {(gallery || (state.ready && !state.projectId)) && <Gallery onClose={closeGallery} />}
       <Toast />
     </div>
   )

@@ -29,7 +29,17 @@ import {
   type SelectTool,
 } from "./selection"
 import { hexToHsv, hexToRgb, hsvToHex, rgbToHsv, type HSV } from "./color"
-import { loadAutosave, saveAutosave, type SavedDoc } from "./storage"
+import {
+  createProject,
+  currentProjectId,
+  deleteProjects,
+  duplicateProject,
+  listProjects,
+  loadProject,
+  rememberProject,
+  saveProject,
+  type SavedDoc,
+} from "./storage"
 import { Stroke, type SampleExtra } from "./stroke"
 import {
   DEFAULT_SHAPE_STYLE,
@@ -191,6 +201,8 @@ export interface ToolSettings {
 
 export interface EngineState extends SelectOptions {
   ready: boolean
+  /** The gallery project being painted, or null when none is open. */
+  projectId: string | null
   hasSelection: boolean
   canReselect: boolean
   /** The selection tool the tool rail's selection button stands for. */
@@ -363,6 +375,7 @@ function defaultSettings(
 export class PaintEngine {
   private state: EngineState = {
     ready: false,
+    projectId: null,
     docW: 2000,
     docH: 1400,
     background: "#f6f3ec",
@@ -514,6 +527,8 @@ export class PaintEngine {
   private layerCounter = 0
   private noticeId = 0
   private saveTimer = 0
+  /** Tail of the chain of saves, so they never overlap. */
+  private saving: Promise<void> = Promise.resolve()
   private blobCache = new Map<string, { rev: number; blob: Blob }>()
 
   // ---- store ---------------------------------------------------------------
@@ -554,16 +569,89 @@ export class PaintEngine {
     } catch {
       this.notify("Painting requires a browser with WebGPU enabled.")
     }
-    const saved: SavedDoc | null = await loadAutosave().catch(() => null)
-    if (saved && saved.layers.length > 0) {
-      try {
-        await this.loadSaved(saved)
-        return
-      } catch {
-        // fall through to a fresh document
-      }
+    const projects = await listProjects().catch(() => [])
+    const last = currentProjectId()
+    const first = projects.find((p) => p.id === last) ?? projects[0]
+    if (first && (await this.openProject(first.id))) {
+      // A project adopted from the old single autosave has no thumbnail yet.
+      if (!first.thumb) this.scheduleSave()
+      return
     }
+    if (projects.length > 0) this.closeProject()
+    else await this.createProject(2000, 1400)
+  }
+
+  // ---- projects --------------------------------------------------------------
+
+  /** Finishes whatever is in progress and writes the open project to storage. */
+  flush(): Promise<void> {
+    this.cancelAction()
+    this.commitText()
+    window.clearTimeout(this.saveTimer)
+    this.saving = this.saving.then(() => this.save())
+    return this.saving
+  }
+
+  /** Saves the open project and switches to another. False if it can't be read. */
+  async openProject(id: string): Promise<boolean> {
+    await this.flush()
+    const doc = await loadProject(id).catch(() => null)
+    if (!doc || doc.layers.length === 0) {
+      this.notify("That painting couldn't be opened")
+      return false
+    }
+    this.distort = null
+    this.blobCache.clear()
+    this.state = { ...this.state, projectId: id }
+    try {
+      await this.loadSaved(doc)
+    } catch {
+      this.closeProject()
+      this.notify("That painting couldn't be opened")
+      return false
+    }
+    rememberProject(id)
+    return true
+  }
+
+  /** Starts a new project with a blank canvas and opens it. */
+  async createProject(w: number, h: number, name = "Untitled painting"): Promise<string> {
+    await this.flush()
+    const id = uid("project")
+    const now = Date.now()
+    try {
+      await createProject({ id, name, width: w, height: h, created: now, updated: now, thumb: null })
+    } catch {
+      // storage unavailable — the canvas still works, it just won't be kept
+    }
+    this.state = { ...this.state, projectId: id }
+    rememberProject(id)
+    this.newDocument(w, h)
+    await this.flush()
+    return id
+  }
+
+  /** Leaves no project open: the canvas is a blank scratch that isn't saved. */
+  private closeProject() {
+    window.clearTimeout(this.saveTimer)
+    this.state = { ...this.state, projectId: null }
+    rememberProject(null)
     this.newDocument(2000, 1400)
+  }
+
+  async deleteProjects(ids: string[]) {
+    if (this.state.projectId && ids.includes(this.state.projectId)) {
+      this.cancelAction()
+      this.commitText()
+      await this.saving
+      this.closeProject()
+    }
+    await deleteProjects(ids)
+  }
+
+  async duplicateProject(id: string) {
+    if (id === this.state.projectId) await this.flush()
+    await duplicateProject(id, uid("project"))
   }
 
   private async loadSaved(doc: SavedDoc) {
@@ -4074,6 +4162,12 @@ export class PaintEngine {
     this.cancelAction()
     this.commitText()
     this.applyDistort()
+    const out = this.flatten()
+    return new Promise((resolve) => out.toBlob(resolve, "image/png"))
+  }
+
+  /** The whole picture as it appears, at full size. */
+  private flatten(): HTMLCanvasElement {
     const { docW, docH, background, showBackground } = this.state
     const out = makeCanvas(docW, docH)
     const ctx = ctxOf(out)
@@ -4083,12 +4177,25 @@ export class PaintEngine {
     }
     if (this.fxActive()) ctx.drawImage(this.compose(), 0, 0)
     else this.drawLayers(ctx)
+    return out
+  }
+
+  /** A small preview of the picture for the gallery. */
+  private thumbnail(): Promise<Blob | null> {
+    const { docW, docH } = this.state
+    const k = Math.min(1, 640 / Math.max(docW, docH))
+    const out = makeCanvas(Math.max(1, Math.round(docW * k)), Math.max(1, Math.round(docH * k)))
+    const ctx = ctxOf(out)
+    ctx.imageSmoothingQuality = "high"
+    ctx.drawImage(this.flatten(), 0, 0, out.width, out.height)
     return new Promise((resolve) => out.toBlob(resolve, "image/png"))
   }
 
   private scheduleSave() {
     window.clearTimeout(this.saveTimer)
-    this.saveTimer = window.setTimeout(() => void this.save(), 1500)
+    this.saveTimer = window.setTimeout(() => {
+      this.saving = this.saving.then(() => this.save())
+    }, 1500)
   }
 
   private async save() {
@@ -4097,6 +4204,8 @@ export class PaintEngine {
       return
     }
     const s = this.state
+    const id = s.projectId
+    if (!id) return
     const blobs: Record<string, Blob> = {}
     for (const meta of s.layers) {
       if (meta.fx || meta.vector) continue
@@ -4135,16 +4244,21 @@ export class PaintEngine {
       if (!(id in blobs)) this.blobCache.delete(id)
     }
     try {
-      await saveAutosave({
-        version: 1,
-        width: s.docW,
-        height: s.docH,
-        background: s.background,
-        showBackground: s.showBackground,
-        layers: s.layers,
-        activeLayerId: s.activeLayerId,
-        blobs,
-      })
+      const thumb = await this.thumbnail()
+      await saveProject(
+        id,
+        {
+          version: 1,
+          width: s.docW,
+          height: s.docH,
+          background: s.background,
+          showBackground: s.showBackground,
+          layers: s.layers,
+          activeLayerId: s.activeLayerId,
+          blobs,
+        },
+        thumb
+      )
     } catch {
       // storage may be unavailable (private mode, quota) — painting still works
     }
