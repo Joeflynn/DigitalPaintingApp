@@ -503,24 +503,25 @@ function ContextBar() {
           {getBrush(settings.brushId).name}
         </span>
         <Divider />
-        {tool !== "smudge" && (
+        <span className={label}>Stabilise</span>
+        <Slider
+          label="Stroke stabilisation"
+          className="w-24"
+          min={0}
+          max={1}
+          value={settings.streamline}
+          onChange={(v) => engine.setToolSettings(tool, { streamline: v })}
+        />
+        <span className="w-7 text-[11px] text-foreground tabular-nums">
+          {Math.round(settings.streamline * 100)}
+        </span>
+        {tool === "smudge" && (
           <>
-            <span className={label}>Stabilise</span>
-            <Slider
-              label="Stroke stabilisation"
-              className="w-24"
-              min={0}
-              max={1}
-              value={settings.streamline}
-              onChange={(v) => engine.setToolSettings(tool, { streamline: v })}
-            />
-            <span className="w-7 text-[11px] text-foreground tabular-nums">
-              {Math.round(settings.streamline * 100)}
+            <Divider />
+            <span className="text-[11px] text-muted-foreground">
+              Blends with a dry brush: no paint added
             </span>
           </>
-        )}
-        {tool === "smudge" && (
-          <span className="text-[11px] text-muted-foreground">Drag to blend paint</span>
         )}
       </>
     )

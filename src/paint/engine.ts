@@ -1,6 +1,7 @@
 import { GPUBrush, GPUSizeError } from "./gpu-brush"
 import {
   type BrushPreset,
+  dryBrush,
   getBrush,
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
@@ -2180,16 +2181,9 @@ export class PaintEngine {
   ) {
     const settings = this.state.toolSettings[tool]
     let brush = this.activeBrush(tool)
-    if (tool === "smudge") {
-      // Smudging moves paint that is already there, so the tip only needs a
-      // steady contact; the tool's opacity acts as its strength.
-      brush = {
-        ...brush,
-        flow: Math.max(brush.flow, 0.35),
-        flowPressure: 0,
-        spacing: Math.min(brush.spacing, 0.06),
-      }
-    }
+    // Smudging drags the paint already there with a dry version of the brush;
+    // the tool's opacity acts as its strength.
+    if (tool === "smudge") brush = dryBrush(brush)
     const gpu = this.gpu
     if (!gpu) {
       this.notify("Painting requires WebGPU. Enable it and reload.")

@@ -17,7 +17,7 @@ struct Params {
   tex2: vec4f,   // canvas texture: invert, unused ×3
   stk: vec4f,    // stroke texture: kind (-1 off, 100 raster), scale, blend, depth
   stk2: vec4f,   // stroke texture: invert, unused ×3
-  spare: vec4f,  // dabs overlapping a pixel, unused ×3
+  spare: vec4f,  // dabs overlapping a pixel, stroke effect, effect scale in px, unused
 }
 
 fn hash21(p: vec2f) -> f32 {
@@ -120,8 +120,13 @@ fn mixPaint(a: vec4f, b: vec4f, t: f32) -> vec4f {
 // Lays paint over the base. `src` is the paint at full coverage,
 // premultiplied; `k` is how much of the pixel it covers. The paint blend
 // picks opaque paint, a transparent glaze that darkens what is beneath it
-// like watercolour, or light that adds to it.
+// like watercolour, light that adds to it, or a negative of what is there.
 fn layPaint(base: vec4f, src: vec4f, k: f32, blend: f32) -> vec4f {
+  if (blend > 2.5) {
+    // Bare canvas counts as white paper, so it inverts to black.
+    let under = mix(vec3f(1.0), base.rgb / max(base.a, 1e-5), base.a);
+    return base * (1.0 - k) + vec4f((1.0 - under) * src.a, src.a) * k;
+  }
   if (blend > 1.5) {
     let a = base.a + src.a * k * (1.0 - base.a);
     return vec4f(min(base.rgb + src.rgb * k, vec3f(a)), a);

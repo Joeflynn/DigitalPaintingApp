@@ -72,27 +72,25 @@ export function BrushPanel({ onOpenStudio }: { onOpenStudio: () => void }) {
         ))}
       </div>
       <div className="min-h-0 flex-1 [scrollbar-width:thin] overflow-y-auto px-2 pb-2">
-        {tool !== "smudge" && (
-          <button
-            type="button"
-            onClick={onOpenStudio}
-            className="group mb-2 block w-full overflow-hidden rounded-xl bg-black/20 text-left outline-none hover:bg-black/35 focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <BrushPreview brush={active} />
-            <span className="flex items-center gap-1.5 px-3 pb-2 text-xs font-semibold">
-              <SlidersHorizontal className="size-3.5" />
-              Brush studio
-              <span className="min-w-0 flex-1 truncate font-normal text-muted-foreground">
-                {active.name}
-              </span>
-              {edited && (
-                <span className="rounded-full bg-primary/40 px-1.5 py-0.5 text-[9px] font-medium">
-                  edited
-                </span>
-              )}
+        <button
+          type="button"
+          onClick={onOpenStudio}
+          className="group mb-2 block w-full overflow-hidden rounded-xl bg-black/20 text-left outline-none hover:bg-black/35 focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <BrushPreview brush={active} />
+          <span className="flex items-center gap-1.5 px-3 pb-2 text-xs font-semibold">
+            <SlidersHorizontal className="size-3.5" />
+            Brush studio
+            <span className="min-w-0 flex-1 truncate font-normal text-muted-foreground">
+              {active.name}
             </span>
-          </button>
-        )}
+            {edited && (
+              <span className="rounded-full bg-primary/40 px-1.5 py-0.5 text-[9px] font-medium">
+                edited
+              </span>
+            )}
+          </span>
+        </button>
         {list.length === 0 && (
           <p className="px-2 py-3 text-[11px] text-muted-foreground">
             No brushes here yet.

@@ -2,9 +2,11 @@
 import {
   MASK_BLENDS,
   PAINT_BLENDS,
+  STROKE_EFFECTS,
   STROKE_TEXTURE_KINDS,
   TEXTURE_KINDS,
   TIP_SHAPES,
+  effectScale,
   type BrushPreset,
 } from "./brushes"
 import type { Dab } from "./stroke"
@@ -294,7 +296,8 @@ export class GPUBrush {
 
   /** How far the simulation may have carried paint beyond the dabs, in px. */
   get margin(): number {
-    return Math.ceil(this.spread) + 2
+    // A stroke effect may draw up to twice its scale away from the dabs.
+    return Math.ceil(this.spread + this.params[66] * 2) + 2
   }
 
   private target(): GPUTexture {
@@ -369,7 +372,9 @@ export class GPUBrush {
         paint ? brush.wetness : 0,
         smudge ? 1 : paint ? brush.pickup : 0,
         paint ? brush.relief : 0,
-        paint ? brush.depletion : 0,
+        // A dry brush runs out of grip along the stroke just as a loaded one
+        // runs out of paint; an eraser never does.
+        mode === "erase" ? 0 : brush.depletion,
       ],
       16
     )
@@ -411,8 +416,12 @@ export class GPUBrush {
     )
     // Roughly how many dabs land on one pixel, for a tip crossing its width.
     p[64] = Math.min(40, Math.max(1, 0.8 / Math.max(0.01, brush.spacing)))
-    // Smudging moves paint that is there, so only the tip shapes the mark.
-    const on = (depth: number) => !smudge && depth > 0
+    p[65] = Math.max(0, STROKE_EFFECTS.indexOf(brush.effect))
+    p[66] = effectScale(brush, setup.size)
+    // Every mode marks the canvas with the whole brush: stamp, dual stamp,
+    // stroke pattern and canvas texture. Painting lays pigment through that
+    // mark, erasing lifts it and smudging drags what is already there.
+    const on = (depth: number) => depth > 0
     p.set(
       [
         on(brush.dualDepth) && brush.dual !== "none"

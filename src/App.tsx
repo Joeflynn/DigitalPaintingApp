@@ -17,7 +17,7 @@ import { TopBar } from "@/components/paint/TopBar"
 import { VectorPanel } from "@/components/paint/VectorPanel"
 import { useEngine, useShortcuts } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
-import { engine, selectedObject } from "@/paint/engine"
+import { engine, isPaintTool, selectedObject } from "@/paint/engine"
 
 function Toast() {
   const { notice } = useEngine()
@@ -113,7 +113,7 @@ export function App() {
       )}
       {studio && (
         <BrushStudio
-          tool={tool === "eraser" ? "eraser" : "brush"}
+          tool={isPaintTool(tool) ? tool : "brush"}
           onClose={closeStudio}
         />
       )}

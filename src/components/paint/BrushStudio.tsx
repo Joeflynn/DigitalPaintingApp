@@ -25,6 +25,9 @@ import {
   deleteCustomBrush,
   getBrush,
   MASK_BLENDS,
+  PAINT_BLENDS,
+  STROKE_EFFECTS,
+  type StrokeEffect,
   normalizeBrush,
   saveCustomBrush,
   type BrushCategory,
@@ -56,6 +59,11 @@ const TIP_LABEL: Record<TipShape, string> = {
   splatter: "Splatter",
   sponge: "Sponge",
   star: "Star",
+  triangle: "Triangle",
+  heart: "Heart",
+  ring: "Ring",
+  sparkle: "Sparkle",
+  shard: "Shard",
   image: "Image…",
 }
 
@@ -68,6 +76,9 @@ const TEXTURE_LABEL: Record<TextureKind, string> = {
   halftone: "Halftone",
   hatch: "Hatch",
   grit: "Grit",
+  stripes: "Stripes",
+  checker: "Checker",
+  cells: "Tiles",
   image: "Image…",
 }
 
@@ -77,6 +88,9 @@ const STROKE_LABEL: Record<StrokeTextureKind, string> = {
   drybrush: "Dry brush",
   dashes: "Dashes",
   waves: "Waves",
+  zigzag: "Zigzag",
+  beads: "Beads",
+  rope: "Rope",
   image: "Image…",
 }
 
@@ -95,6 +109,27 @@ const PAINT_BLEND_LABEL: Record<PaintBlend, string> = {
   normal: "Opaque",
   glaze: "Glaze",
   glow: "Glow",
+  invert: "Invert",
+}
+
+const EFFECT_LABEL: Record<StrokeEffect, string> = {
+  none: "None",
+  pixel: "Pixel",
+  outline: "Outline",
+  sticker: "Sticker",
+  chroma: "Colour split",
+  glitch: "Glitch",
+  mosaic: "Mosaic",
+}
+
+const EFFECT_HINT: Record<StrokeEffect, string> = {
+  none: "The stroke is drawn as the stamp lays it down.",
+  pixel: "Snaps the stroke to chunky, hard-edged blocks.",
+  outline: "Draws only the rim of the stroke, so overlapping passes merge into one hollow shape.",
+  sticker: "Adds a white border and a soft shadow, like a die-cut sticker.",
+  chroma: "Slides the red and blue channels apart, like a misprinted comic.",
+  glitch: "Tears the stroke into rows that jump sideways.",
+  mosaic: "Breaks the stroke into irregular tiles with dark lines between them.",
 }
 
 const INPUT_LABEL: Record<LinkInput, string> = {
@@ -574,7 +609,7 @@ function MediaSection() {
           <Chips
             label="How paint sits on what is beneath"
             value={brush.paintBlend}
-            options={["normal", "glaze", "glow"] as const}
+            options={PAINT_BLENDS}
             labels={PAINT_BLEND_LABEL}
             onChange={(paintBlend) => set({ paintBlend })}
           />
@@ -584,8 +619,25 @@ function MediaSection() {
             ? "Transparent, like watercolour: layers darken and tint what is under them."
             : brush.paintBlend === "glow"
               ? "Adds light to what is under it. Best over dark paint."
-              : "Covers what is under it."}
+              : brush.paintBlend === "invert"
+                ? "Turns what is under it into its negative, whatever colour is picked."
+                : "Covers what is under it."}
         </p>
+      </Group>
+      <Group title="Stroke effect" hint="Redraws the whole stroke after the stamps have been laid down.">
+        <div className="mb-1">
+          <Chips
+            label="Stroke effect"
+            value={brush.effect}
+            options={STROKE_EFFECTS}
+            labels={EFFECT_LABEL}
+            onChange={(effect) => set({ effect })}
+          />
+        </div>
+        <p className="mb-1 text-[11px] leading-snug text-muted-foreground/80">{EFFECT_HINT[brush.effect]}</p>
+        {brush.effect !== "none" && (
+          <Num k="effectAmount" label="Effect size" min={0.02} max={1} hint="Block, line or offset size relative to the brush" />
+        )}
       </Group>
       <Group title="Oil & impasto" hint="Thick paint that mixes on the canvas.">
         <Num k="pickup" label="Colour pickup" min={0} max={1} hint="How much the tip takes up from the canvas and drags along" />
@@ -761,7 +813,7 @@ function sectionActive(name: string, b: BrushPreset): boolean {
     case "Stroke":
       return b.strokeTex !== "none" && b.strokeDepth > 0
     case "Media":
-      return b.wetness > 0 || b.pickup > 0 || b.relief > 0 || b.drip > 0 || b.paintBlend !== "normal"
+      return b.wetness > 0 || b.pickup > 0 || b.relief > 0 || b.drip > 0 || b.paintBlend !== "normal" || b.effect !== "none"
     case "Dynamics":
       return b.links.length > 0
     case "Colour":

@@ -185,6 +185,63 @@ fn tipShape(kind: u32, t: TipIn) -> vec3f {
       let soft = max((1.0 - hard) * 0.4, t.aa * 1.5);
       mask = 1.0 - smoothstep(-soft, 0.0, sd);
     }
+    case 8u: {
+      // Equilateral triangle, pointing up.
+      let k = 1.7320508;
+      let rad = 0.78;
+      var q = vec2f(abs(t.uv.x) - rad, -t.uv.y + rad / k - 0.18);
+      if (q.x + k * q.y > 0.0) {
+        q = vec2f(q.x - k * q.y, -k * q.x - q.y) * 0.5;
+      }
+      q.x -= clamp(q.x, -2.0 * rad, 0.0);
+      let sd = -length(q) * sign(q.y);
+      let soft = max((1.0 - hard) * 0.4, t.aa * 1.5);
+      mask = 1.0 - smoothstep(-soft, 0.0, sd);
+    }
+    case 9u: {
+      // Heart.
+      let s = 0.56;
+      var q = vec2f(abs(t.uv.x) * s, 0.52 - t.uv.y * s);
+      var sd = 0.0;
+      if (q.y + q.x > 1.0) {
+        sd = length(q - vec2f(0.25, 0.75)) - 0.35355339;
+      } else {
+        let a = q - vec2f(0.0, 1.0);
+        let b = q - 0.5 * max(q.x + q.y, 0.0);
+        sd = sqrt(min(dot(a, a), dot(b, b))) * sign(q.x - q.y);
+      }
+      let soft = max((1.0 - hard) * 0.4, t.aa * 1.5);
+      mask = 1.0 - smoothstep(-soft, 0.0, sd / s);
+    }
+    case 10u: {
+      // Ring: an out-of-focus highlight, a faint disc with a brighter rim.
+      let edge = max(mix(0.3, 0.04, t.hard), t.aa * 1.5);
+      let outer = 1.0 - smoothstep(0.94 - edge, 0.94, r);
+      let rim = smoothstep(0.5, 0.82, r);
+      mask = outer * (0.4 + 0.6 * rim);
+      height = 0.2;
+    }
+    case 11u: {
+      // Sparkle: a four-pointed glint with a soft core.
+      let a = abs(t.uv);
+      let spikes = 1.0 - smoothstep(0.55, 1.0, sqrt(a.x) + sqrt(a.y));
+      let core = exp(-r * r * 14.0);
+      mask = clamp(spikes + core * 0.8, 0.0, 1.0) * (1.0 - smoothstep(0.85, 1.0, r));
+      height = 0.2;
+    }
+    case 12u: {
+      // Shard: a random angular chip, different for every dab.
+      var sd = -1.0;
+      for (var i = 0; i < 4; i++) {
+        let h = hash21(vec2f(f32(i) * 7.3 + 1.1, t.dseed * 97.0));
+        let h2 = hash21(vec2f(f32(i) * 3.7 + 5.9, t.dseed * 53.0));
+        let ang = (f32(i) + (h - 0.5) * 0.8) * 1.5707963;
+        sd = max(sd, dot(t.uv, vec2f(cos(ang), sin(ang))) - (0.22 + 0.45 * h2));
+      }
+      let soft = max((1.0 - hard) * 0.4, t.aa * 1.5);
+      mask = (1.0 - smoothstep(-soft, 0.0, sd)) * (1.0 - smoothstep(0.92, 1.0, r));
+      height = 0.7;
+    }
     default: {}
   }
   return vec3f(mask, height, tone);
@@ -230,6 +287,40 @@ fn canvasTexture(kind: u32, px: vec2f, scale: f32) -> f32 {
       // Grit: hard-edged specks.
       return hash21(floor(px / s));
     }
+    case 7u: {
+      // Stripes: hard diagonal bands.
+      let f = fract((px.x - px.y) / (s * 22.0));
+      let e = 1.0 / (s * 22.0);
+      return smoothstep(0.0, e, f) * (1.0 - smoothstep(0.5, 0.5 + e, f));
+    }
+    case 8u: {
+      // Checkerboard.
+      let q = floor(px / (s * 14.0));
+      return abs((q.x + q.y) % 2.0);
+    }
+    case 9u: {
+      // Cells: irregular tiles of differing height, with grout between them,
+      // so a light touch fills only some of them.
+      let q = px / (s * 16.0);
+      let cell = floor(q);
+      var f1 = 9.0;
+      var f2 = 9.0;
+      var id = cell;
+      for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+          let c = cell + vec2f(f32(i), f32(j));
+          let dd = length(q - c - vec2f(hash21(c + 1.7), hash21(c + 8.3)));
+          if (dd < f1) {
+            f2 = f1;
+            f1 = dd;
+            id = c;
+          } else if (dd < f2) {
+            f2 = dd;
+          }
+        }
+      }
+      return smoothstep(0.05, 0.12, f2 - f1) * mix(0.45, 1.0, hash21(id + 23.0));
+    }
     default: {
       return paper(px, scale);
     }
@@ -257,6 +348,26 @@ fn strokeTexture(kind: u32, along: f32, across: f32, scale: f32, wetLoad: f32) -
     case 3u: {
       // Waves: bands that ripple across the stroke.
       return 0.5 + 0.5 * sin(along * 9.0 / s + sin(across * 3.0) * 1.4);
+    }
+    case 4u: {
+      // Zigzag: a single line bouncing between the edges of the stroke.
+      let tri = abs(fract(along / (s * 1.1)) - 0.5) * 4.0 - 1.0;
+      // The line's slope, so its thickness is measured across it.
+      let slope = 4.0 / (s * 1.1) * 0.5;
+      let dd = abs(across - tri * 0.62) / sqrt(1.0 + slope * slope);
+      return 1.0 - smoothstep(0.1, 0.16, dd);
+    }
+    case 5u: {
+      // Beads: a string of discs.
+      let pitch = 1.7 * s;
+      let u = (fract(along * 2.0 / pitch) - 0.5) * pitch;
+      let rad = 0.8 * min(s, 1.0);
+      return 1.0 - smoothstep(rad - 0.08, rad, length(vec2f(u, across)));
+    }
+    case 6u: {
+      // Rope: twisted strands with gaps slanting across the stroke.
+      let f = fract(along * 2.0 / (1.3 * s) + across * 0.55);
+      return smoothstep(0.0, 0.08, f) * (1.0 - smoothstep(0.74, 0.82, f));
     }
     default: {
       // Fibres: long streaks, one per strand of the tip.

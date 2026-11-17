@@ -1,6 +1,6 @@
 // Visual and sanity checks for the WebGPU brush renderer.
 // Open /tests/brush-lab.html under the Vite dev server.
-import { BRUSHES, getBrush, type BrushPreset } from "../src/paint/brushes"
+import { BRUSHES, dryBrush, getBrush, type BrushPreset } from "../src/paint/brushes"
 import { GPUBrush, type StrokeSetup } from "../src/paint/gpu-brush"
 import { sampleStroke, Stroke } from "../src/paint/stroke"
 
@@ -105,7 +105,7 @@ try {
   show("Hard Round as eraser", erased)
   check(sum(pixels(erased), 3) < blank, "erasing removes paint")
 
-  const smudged = render(gpu, getBrush("soft-airbrush"), {
+  const smudged = render(gpu, dryBrush(getBrush("soft-airbrush")), {
     mode: "smudge",
     opacity: 0.8,
   })
@@ -113,6 +113,69 @@ try {
   const sp = pixels(smudged)
   // Between the blue and yellow bands the layer starts out transparent.
   check(sp[(85 * W + 330) * 4 + 3] > 0, "smudging drags paint into gaps")
+
+  // A dry brush keeps its character but lays no pigment of its own.
+  const dryChalk = render(gpu, dryBrush(getBrush("charcoal")), { mode: "smudge", opacity: 1 })
+  show("Charcoal as smudge", dryChalk)
+  const softSmear = render(gpu, dryBrush({ ...getBrush("charcoal"), tip: "round", grain: 0 }), {
+    mode: "smudge",
+    opacity: 1,
+  })
+  const changed = (c: HTMLCanvasElement) => {
+    const d = pixels(c)
+    const before = pixels(bandedLayer())
+    let n = 0
+    for (let i = 0; i < d.length; i += 4) {
+      if (Math.abs(d[i] - before[i]) + Math.abs(d[i + 3] - before[i + 3]) > 12) n++
+    }
+    return n
+  }
+  check(
+    changed(dryChalk) > 500 && changed(dryChalk) < changed(softSmear) * 0.9,
+    "a textured brush smudges through its texture"
+  )
+  {
+    // Over bare canvas before the first band there is nothing to drag.
+    const d = pixels(dryChalk)
+    let a = 0
+    for (let y = 0; y < H; y++) for (let x = 0; x < 200; x++) a += d[(y * W + x) * 4 + 3]
+    check(a === 0, "smudging adds no pigment to bare canvas")
+  }
+  const erasedChalk = render(gpu, getBrush("charcoal"), { mode: "erase" }, 1)
+  show("Charcoal as eraser", erasedChalk)
+  check(
+    sum(pixels(erasedChalk), 3) < blank &&
+      sum(pixels(erasedChalk), 3) > sum(pixels(render(gpu, { ...getBrush("charcoal"), tip: "round", grain: 0 }, { mode: "erase" }, 1)), 3),
+    "a textured eraser lifts paint through its texture"
+  )
+
+  // ---- stroke effects --------------------------------------------------------
+  const marker = { ...getBrush("hard-round"), sizePressure: 0, size: 40 }
+  const solid = sum(pixels(render(gpu, marker, {}, 1)), 3)
+  const hollow = render(gpu, { ...marker, effect: "outline", effectAmount: 0.3 }, {}, 1)
+  show("Outline effect", hollow)
+  check(sum(pixels(hollow), 3) < solid * 0.8, "the outline effect hollows the stroke")
+  // The middle of the stroke, over bare canvas, is left empty.
+  check(pixels(hollow)[(85 * W + 140) * 4 + 3] === 0, "the outline effect leaves the middle open")
+  const sticker = render(gpu, { ...marker, effect: "sticker", effectAmount: 0.4 }, {}, 1)
+  check(sum(pixels(sticker), 3) > solid * 1.1, "the sticker effect adds a border")
+  const blocks = pixels(render(gpu, { ...marker, effect: "pixel", effectAmount: 0.4 }, {}, 1))
+  {
+    // Blocks are 8 px: every pixel of a block matches its top-left corner.
+    let same = true
+    for (let y = 40; y < 120 && same; y += 8) {
+      for (let x = 64; x < 232 && same; x += 8) {
+        const i = (y * W + x) * 4 + 3
+        const j = ((y + 7) * W + x + 7) * 4 + 3
+        same = blocks[i] === blocks[j]
+      }
+    }
+    check(same, "the pixel effect snaps the stroke to blocks")
+  }
+  const neg = pixels(render(gpu, { ...marker, paintBlend: "invert" }, {}, 1))
+  // Middle of the yellow band (#f6c445) becomes its negative.
+  const ny = (85 * W + 455) * 4
+  check(neg[ny] < 30 && neg[ny + 2] > 150, "the invert blend makes a negative")
 
   const locked = render(gpu, getBrush("hard-round"), { alphaLock: true })
   show("Hard Round with alpha lock", locked)

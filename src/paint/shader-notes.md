@@ -60,10 +60,21 @@ A stroke lives in two `rgba16float` buffers laid over a snapshot of the layer:
    short time after the pen lifts.
 5. **Resolve** (`resolve.wgsl`). Lights the height field, lays the stroke over
    the base with the stroke opacity and the brush's paint blend (opaque,
-   glaze or glow), applies alpha lock, and writes the whole layer to the
-   WebGPU canvas. The engine shows that canvas in place of the layer while
+   glaze, glow or invert), applies alpha lock, and writes the whole layer to
+   the WebGPU canvas. A brush's **stroke effect** (pixel, outline, sticker,
+   colour split, glitch, mosaic) is applied here by changing where the stroke
+   buffers are read, so it treats the whole stroke as one shape. Effects draw
+   outside the dabs, so `margin` grows by twice the effect's scale. The engine shows that canvas in place of the layer while
    the stroke is live and copies the affected rectangle into the layer when
    it commits.
+
+## One brush, three tools
+
+Painting, smudging and erasing all mark the canvas with the whole brush:
+stamp, dual stamp, stroke pattern, canvas texture and dynamics. Painting lays
+pigment through that mark, erasing lifts it (paint 0), and smudging is the
+same brush run dry (`dryBrush`): the reservoir starts empty, never reloads,
+and only drags what it soaks up from the canvas.
 
 ## Things that are easy to get wrong
 

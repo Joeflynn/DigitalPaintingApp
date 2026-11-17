@@ -8,6 +8,11 @@ export type TipShape =
   | "flat"
   | "sponge"
   | "star"
+  | "triangle"
+  | "heart"
+  | "ring"
+  | "sparkle"
+  | "shard"
   | "image"
 
 /** Order matters: the shaders identify a tip by its index here. */
@@ -20,6 +25,11 @@ export const TIP_SHAPES: TipShape[] = [
   "flat",
   "sponge",
   "star",
+  "triangle",
+  "heart",
+  "ring",
+  "sparkle",
+  "shard",
 ]
 
 /** A pattern fixed to the canvas that the mark is broken up by. */
@@ -32,6 +42,9 @@ export type TextureKind =
   | "halftone"
   | "hatch"
   | "grit"
+  | "stripes"
+  | "checker"
+  | "cells"
   | "image"
 
 export const TEXTURE_KINDS: TextureKind[] = [
@@ -42,6 +55,9 @@ export const TEXTURE_KINDS: TextureKind[] = [
   "halftone",
   "hatch",
   "grit",
+  "stripes",
+  "checker",
+  "cells",
 ]
 
 /** A pattern that runs along the stroke and across its tangent. */
@@ -51,6 +67,9 @@ export type StrokeTextureKind =
   | "drybrush"
   | "dashes"
   | "waves"
+  | "zigzag"
+  | "beads"
+  | "rope"
   | "image"
 
 export const STROKE_TEXTURE_KINDS: StrokeTextureKind[] = [
@@ -58,6 +77,9 @@ export const STROKE_TEXTURE_KINDS: StrokeTextureKind[] = [
   "drybrush",
   "dashes",
   "waves",
+  "zigzag",
+  "beads",
+  "rope",
 ]
 
 /** How a stamp, texture or stroke pattern combines with the mark so far. */
@@ -83,9 +105,57 @@ export const MASK_BLENDS: MaskBlend[] = [
 ]
 
 /** How the finished stroke sits on the paint beneath it. */
-export type PaintBlend = "normal" | "glaze" | "glow"
+export type PaintBlend = "normal" | "glaze" | "glow" | "invert"
 
-export const PAINT_BLENDS: PaintBlend[] = ["normal", "glaze", "glow"]
+export const PAINT_BLENDS: PaintBlend[] = ["normal", "glaze", "glow", "invert"]
+
+/**
+ * A treatment of the whole stroke as it is drawn, applied after the dabs have
+ * been laid down: it reshapes or recolours the mark rather than the stamp.
+ */
+export type StrokeEffect =
+  | "none"
+  | "pixel"
+  | "outline"
+  | "sticker"
+  | "chroma"
+  | "glitch"
+  | "mosaic"
+
+/** Order matters: the resolve shader identifies an effect by its index here. */
+export const STROKE_EFFECTS: StrokeEffect[] = [
+  "none",
+  "pixel",
+  "outline",
+  "sticker",
+  "chroma",
+  "glitch",
+  "mosaic",
+]
+
+/**
+ * The effect's reach in document pixels for a brush of this diameter: block
+ * size, line width, colour offset or cell size, depending on the effect.
+ */
+export function effectScale(brush: BrushPreset, size: number): number {
+  const a = Math.min(1, Math.max(0, brush.effectAmount))
+  switch (brush.effect) {
+    case "pixel":
+      return Math.max(2, Math.round(size * a * 0.5))
+    case "outline":
+      return Math.max(1.5, size * a * 0.25)
+    case "sticker":
+      return Math.max(1.5, size * a * 0.3)
+    case "chroma":
+      return Math.max(1, size * a * 0.3)
+    case "glitch":
+      return Math.max(2, size * a * 1.5)
+    case "mosaic":
+      return Math.max(4, size * a * 0.8)
+    default:
+      return 0
+  }
+}
 
 export type LinkInput = "pressure" | "speed" | "tilt" | "fade" | "random"
 
@@ -167,8 +237,12 @@ export interface BrushPreset {
   strokeScale: number
 
   // ---- material: how the paint behaves once it is on the surface ----------
-  /** How the stroke sits on what is beneath: opaque, a glaze, or light */
+  /** How the stroke sits on what is beneath: opaque, a glaze, light, or inverting */
   paintBlend: PaintBlend
+  /** A treatment of the whole stroke: pixel blocks, outlines, colour splits… */
+  effect: StrokeEffect
+  /** Scale of the effect relative to the brush size (0–1) */
+  effectAmount: number
   /** Wet paint bleeds into its surroundings and dries with a dark rim (0–1) */
   wetness: number
   /** How far wet paint creeps outwards (0–1) */
@@ -275,6 +349,8 @@ export const BRUSH_DEFAULTS: Omit<BrushPreset, "id" | "name" | "category"> = {
   strokeDepth: 0.6,
   strokeScale: 1,
   paintBlend: "normal",
+  effect: "none",
+  effectAmount: 0.3,
   wetness: 0,
   bleed: 0.5,
   edgeDarken: 0.5,
@@ -768,6 +844,221 @@ export const BRUSHES: BrushPreset[] = [
     hueJitter: 0.02,
     streamline: 0.15,
   }),
+  preset("pixel-pen", "Pixel Pen", "FX", {
+    hardness: 0.95,
+    size: 40,
+    spacing: 0.05,
+    sizePressure: 0.5,
+    effect: "pixel",
+    effectAmount: 0.3,
+    streamline: 0.2,
+  }),
+  preset("hollow-liner", "Hollow Liner", "FX", {
+    hardness: 0.92,
+    size: 38,
+    spacing: 0.04,
+    sizePressure: 0.7,
+    minSize: 0.2,
+    effect: "outline",
+    effectAmount: 0.3,
+    streamline: 0.5,
+  }),
+  preset("sticker", "Sticker Marker", "FX", {
+    hardness: 0.92,
+    size: 36,
+    spacing: 0.04,
+    sizePressure: 0.35,
+    effect: "sticker",
+    effectAmount: 0.4,
+    streamline: 0.45,
+  }),
+  preset("anaglyph", "3D Glasses", "FX", {
+    hardness: 0.88,
+    size: 30,
+    spacing: 0.04,
+    sizePressure: 0.5,
+    effect: "chroma",
+    effectAmount: 0.45,
+    streamline: 0.4,
+  }),
+  preset("glitch", "Glitch", "FX", {
+    tip: "flat",
+    hardness: 0.9,
+    size: 56,
+    roundness: 0.45,
+    spacing: 0.05,
+    effect: "glitch",
+    effectAmount: 0.45,
+    strokeHueJitter: 0.1,
+    streamline: 0.2,
+  }),
+  preset("stained-glass", "Stained Glass", "FX", {
+    hardness: 0.8,
+    size: 90,
+    spacing: 0.06,
+    sizePressure: 0.3,
+    effect: "mosaic",
+    effectAmount: 0.35,
+    hueJitter: 0.12,
+    lumJitter: 0.2,
+    streamline: 0.2,
+  }),
+  preset("negative", "Negative", "FX", {
+    hardness: 0.85,
+    size: 70,
+    spacing: 0.05,
+    sizePressure: 0.3,
+    paintBlend: "invert",
+    streamline: 0.3,
+  }),
+  preset("bokeh", "Bokeh", "FX", {
+    tip: "ring",
+    hardness: 0.75,
+    size: 80,
+    opacity: 0.8,
+    spacing: 0.9,
+    flow: 0.5,
+    flowJitter: 0.6,
+    scatter: 1.1,
+    sizeJitter: 0.7,
+    paintBlend: "glow",
+    hueJitter: 0.1,
+    lumJitter: 0.15,
+    secondaryMix: 0.4,
+    streamline: 0.1,
+  }),
+  preset("glimmer", "Glimmer", "FX", {
+    tip: "sparkle",
+    size: 60,
+    spacing: 0.5,
+    flow: 0.9,
+    flowJitter: 0.4,
+    angleJitter: 0.08,
+    scatter: 1,
+    sizeJitter: 0.85,
+    sizePressure: 0.4,
+    paintBlend: "glow",
+    hueJitter: 0.08,
+    streamline: 0.1,
+  }),
+  preset("hearts", "Heart Trail", "FX", {
+    tip: "heart",
+    hardness: 0.9,
+    size: 46,
+    spacing: 0.85,
+    angleJitter: 0.12,
+    scatter: 0.5,
+    sizeJitter: 0.5,
+    sizePressure: 0.4,
+    hueJitter: 0.08,
+    lumJitter: 0.2,
+    secondaryMix: 0.35,
+    streamline: 0.2,
+  }),
+  preset("shatter", "Shatter", "FX", {
+    tip: "shard",
+    hardness: 0.95,
+    size: 70,
+    spacing: 0.3,
+    angleJitter: 1,
+    scatter: 0.7,
+    sizeJitter: 0.6,
+    sizePressure: 0.4,
+    hueJitter: 0.05,
+    lumJitter: 0.45,
+    secondaryMix: 0.3,
+    streamline: 0.1,
+  }),
+  preset("bunting", "Bunting", "FX", {
+    tip: "triangle",
+    hardness: 0.95,
+    size: 44,
+    spacing: 0.95,
+    followDirection: true,
+    angle: 180,
+    hueJitter: 0.5,
+    satJitter: 0.1,
+    sizePressure: 0.3,
+    streamline: 0.5,
+  }),
+  preset("bead-chain", "Bead Chain", "FX", {
+    hardness: 0.9,
+    size: 32,
+    spacing: 0.03,
+    strokeTex: "beads",
+    strokeDepth: 1,
+    relief: 0.9,
+    gloss: 0.9,
+    streamline: 0.55,
+  }),
+  preset("candy-rope", "Candy Rope", "FX", {
+    hardness: 0.9,
+    size: 34,
+    spacing: 0.03,
+    strokeTex: "rope",
+    strokeDepth: 1,
+    relief: 0.8,
+    gloss: 0.8,
+    streamline: 0.55,
+  }),
+  preset("zigzag", "Zigzag Stitch", "FX", {
+    hardness: 0.95,
+    size: 36,
+    spacing: 0.03,
+    strokeTex: "zigzag",
+    strokeDepth: 1,
+    streamline: 0.6,
+  }),
+  preset("bubblegum", "Bubblegum", "FX", {
+    hardness: 0.35,
+    size: 44,
+    spacing: 0.04,
+    sizePressure: 0.4,
+    relief: 1,
+    gloss: 1,
+    streamline: 0.5,
+  }),
+  preset("checker-roller", "Checker Roller", "FX", {
+    tip: "flat",
+    hardness: 0.92,
+    size: 90,
+    roundness: 0.5,
+    followDirection: true,
+    angle: 90,
+    spacing: 0.04,
+    texture: "checker",
+    textureBlend: "multiply",
+    grain: 1,
+    grainScale: 1.5,
+    streamline: 0.3,
+  }),
+  preset("stripe-roller", "Stripe Roller", "FX", {
+    tip: "flat",
+    hardness: 0.92,
+    size: 90,
+    roundness: 0.5,
+    followDirection: true,
+    angle: 90,
+    spacing: 0.04,
+    texture: "stripes",
+    textureBlend: "multiply",
+    grain: 1,
+    grainScale: 1.2,
+    streamline: 0.3,
+  }),
+  preset("tile-press", "Tile Press", "FX", {
+    hardness: 0.85,
+    size: 100,
+    spacing: 0.05,
+    flowPressure: 0.3,
+    texture: "cells",
+    textureBlend: "height",
+    grain: 1,
+    grainScale: 1.6,
+    relief: 0.5,
+    lumJitter: 0.1,
+    streamline: 0.2,
+  }),
 ]
 
 // ---- brush library: built-in presets plus the user's own -------------------
@@ -784,6 +1075,7 @@ export function normalizeBrush(raw: Partial<BrushPreset>): BrushPreset {
     ...raw,
   }
   if (!BRUSH_CATEGORIES.includes(b.category)) b.category = "Paint"
+  if (!STROKE_EFFECTS.includes(b.effect)) b.effect = "none"
   b.links = Array.isArray(b.links) ? b.links.map((l) => ({ ...l })) : []
   return b
 }
@@ -844,6 +1136,20 @@ export function deleteCustomBrush(id: string) {
 
 export function getBrush(id: string): BrushPreset {
   return byId.get(id) ?? BRUSHES[0]
+}
+
+/**
+ * The brush as the smudge tool uses it: the same tip, textures and dynamics,
+ * but dry. It lays no pigment, so thin washes and airbrushes are given enough
+ * contact to move paint, and the lightest touch still blends a little.
+ */
+export function dryBrush(brush: BrushPreset): BrushPreset {
+  return {
+    ...brush,
+    flow: Math.max(brush.flow, 0.35),
+    flowPressure: Math.min(brush.flowPressure, 0.8),
+    flowJitter: Math.min(brush.flowJitter, 0.3),
+  }
 }
 
 export const MIN_BRUSH_SIZE = 1
