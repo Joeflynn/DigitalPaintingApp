@@ -16,6 +16,7 @@ import { NewCanvasMenu } from "@/components/paint/TopBar"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { engine } from "@/paint/engine"
+import { importImages } from "@/paint/palettes"
 import { listProjects, renameProject, type ProjectMeta } from "@/paint/storage"
 
 /** Largest canvas side an imported image is given. */
@@ -306,8 +307,8 @@ export function Gallery({ onClose }: { onClose: () => void }) {
       const k = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height))
       const name = file.name.replace(/\.[^.]+$/, "") || "Imported image"
       await engine.createProject(Math.round(bmp.width * k), Math.round(bmp.height * k), name)
-      engine.addImageLayer(bmp, bmp.width, bmp.height, name)
       bmp.close()
+      await importImages([file], (f) => engine.importImage(f, name))
       onClose()
     } catch {
       engine.notify("That file couldn't be opened as an image")

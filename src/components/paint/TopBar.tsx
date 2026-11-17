@@ -32,6 +32,7 @@ import { SELECT_TOOL_INFO } from "@/components/paint/select-tools"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { getBrush } from "@/paint/brushes"
+import { importImages } from "@/paint/palettes"
 import {
   engine,
   isPaintTool,
@@ -617,15 +618,8 @@ export function TopBar({
     engine.notify("Exported PNG")
   }
 
-  const importImage = async (file: File | undefined) => {
-    if (!file) return
-    try {
-      const bmp = await createImageBitmap(file)
-      engine.addImageLayer(bmp, bmp.width, bmp.height, file.name.replace(/\.[^.]+$/, ""))
-      bmp.close()
-    } catch {
-      engine.notify("That file couldn't be opened as an image")
-    }
+  const importImage = (file: File | undefined) => {
+    if (file) void importImages([file], (f, name) => engine.importImage(f, name))
   }
 
   return (

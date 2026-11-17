@@ -18,6 +18,7 @@ import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { hsvToHex, hsvToRgb, rgbToHex, rgbToHsv, type HSV } from "@/paint/color"
 import { engine } from "@/paint/engine"
+import { palettes, usePalettes, type ColorTab } from "@/paint/palettes"
 
 const PALETTES: { name: string; colors: string[] }[] = [
   {
@@ -268,8 +269,7 @@ function Values({ color, hex }: { color: HSV; hex: string }) {
   )
 }
 
-type Tab = "basic" | "palettes" | "values"
-const TABS: [Tab, string][] = [
+const TABS: [ColorTab, string][] = [
   ["basic", "Basic"],
   ["palettes", "Palettes"],
   ["values", "Value"],
@@ -281,7 +281,8 @@ export function ColorPanel() {
   const { color } = s
   const hex = hsvToHex(color)
   const [shape, setShape] = useState(loadShape)
-  const [tab, setTab] = useState<Tab>("basic")
+  const { tab, custom } = usePalettes()
+  const setTab = palettes.setTab
 
   const nextShape = () => {
     const next = WHEEL_SHAPES[(WHEEL_SHAPES.indexOf(shape) + 1) % WHEEL_SHAPES.length]
@@ -394,6 +395,21 @@ export function ColorPanel() {
               <Swatches colors={s.recentColors} current={hex} />
             </div>
           )}
+          {custom.map((p) => (
+            <div key={p.id}>
+              <div className="mb-1.5 flex items-center justify-between">
+                <h3 className="truncate text-xs font-semibold text-foreground">{p.name}</h3>
+                <button
+                  type="button"
+                  onClick={() => palettes.remove(p.id)}
+                  className="rounded-md px-1.5 text-[10px] text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  Remove
+                </button>
+              </div>
+              <Swatches colors={p.colors} current={hex} />
+            </div>
+          ))}
           {PALETTES.map((p) => (
             <div key={p.name}>
               <h3 className="mb-1.5 text-xs font-semibold text-foreground">{p.name}</h3>

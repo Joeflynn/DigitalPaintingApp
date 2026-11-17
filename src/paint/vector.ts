@@ -44,6 +44,8 @@ export interface ShapeObject extends VecBase {
   ring: number
   /** Arrow: head length as a multiple of the stroke width. */
   head: number
+  /** Id of an image that fills the shape, cropped to cover it. */
+  image?: string
 }
 
 export interface TextObject extends VecBase {
@@ -66,7 +68,7 @@ export interface TextObject extends VecBase {
 export type VectorObject = ShapeObject | TextObject
 
 type Geometry = "id" | "type" | "x" | "y" | "w" | "h" | "rot"
-export type ShapeStyle = Omit<ShapeObject, Geometry>
+export type ShapeStyle = Omit<ShapeObject, Geometry | "image">
 export type TextStyle = Omit<TextObject, Geometry | "text" | "wrap">
 /** Any subset of object properties; keys an object doesn't have are ignored. */
 export type VecPatch = Partial<Omit<ShapeObject, "id" | "type">> &
@@ -142,12 +144,28 @@ export const DEFAULT_TEXT_STYLE: TextStyle = {
   spacing: 0,
 }
 
+// Decoded images for image fills, by id. The engine owns their lifetime.
+const imageAssets = new Map<string, ImageBitmap>()
+
+export function setImageAsset(id: string, image: ImageBitmap) {
+  imageAssets.set(id, image)
+}
+
+export function clearImageAssets() {
+  for (const image of imageAssets.values()) image.close()
+  imageAssets.clear()
+}
+
+/** True for a shape filled with an image. */
+export const isImageObject = (o: VectorObject): boolean => o.type === "shape" && !!o.image
+
 export const isLine = (o: VectorObject): boolean =>
   o.type === "shape" && (o.shape === "line" || o.shape === "arrow")
 
 export function makeShape(style: ShapeStyle, x: number, y: number): ShapeObject {
   return normalizeShape({
     ...style,
+    image: undefined,
     id: uid("obj"),
     type: "shape",
     x,
@@ -456,6 +474,19 @@ function drawShape(ctx: CanvasRenderingContext2D, o: ShapeObject) {
     ctx.fillStyle = o.fill
     ctx.fill()
   }
+  const image = o.image ? imageAssets.get(o.image) : undefined
+  if (image) {
+    // Scaled to cover the box and cropped to the shape, like a fill.
+    const k = Math.max(o.w / image.width, o.h / image.height)
+    const sw = o.w / k
+    const sh = o.h / k
+    ctx.save()
+    ctx.clip()
+    ctx.imageSmoothingQuality = "high"
+    ctx.drawImage(image, (image.width - sw) / 2, (image.height - sh) / 2, sw, sh, -o.w / 2, -o.h / 2, o.w, o.h)
+    ctx.restore()
+    // drawImage leaves the path alone, so the stroke below still follows it.
+  }
   if (o.stroke && o.strokeWidth > 0) {
     ctx.strokeStyle = o.stroke
     ctx.lineWidth = o.strokeWidth
@@ -553,7 +584,7 @@ export function hitObject(o: VectorObject, x: number, y: number, tol: number): b
   const ctx = mctx()
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   shapePath(ctx, o)
-  if (o.fill && ctx.isPointInPath(lx, ly)) return true
+  if ((o.fill || o.image) && ctx.isPointInPath(lx, ly)) return true
   ctx.lineWidth = (o.stroke ? o.strokeWidth : 0) + tol * 2
   return ctx.isPointInStroke(lx, ly)
 }

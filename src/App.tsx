@@ -10,6 +10,7 @@ import { ColorPanel } from "@/components/paint/ColorPanel"
 import { DistortPanel } from "@/components/paint/DistortPanel"
 import { panelClass } from "@/components/paint/controls"
 import { PanelFrame, SnapGuides, measureInsets, useLayout } from "@/components/paint/layout"
+import { ImportOffer } from "@/components/paint/ImportOffer"
 import { LayersPanel } from "@/components/paint/LayersPanel"
 import { ToolRail } from "@/components/paint/ToolRail"
 import { TopBar } from "@/components/paint/TopBar"
@@ -118,6 +119,7 @@ export function App() {
       )}
       {/* With no project open there is nothing to paint on, so the gallery stays up. */}
       {(gallery || (state.ready && !state.projectId)) && <Gallery onClose={closeGallery} />}
+      <ImportOffer />
       <Toast />
     </div>
   )

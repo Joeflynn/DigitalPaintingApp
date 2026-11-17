@@ -42,6 +42,9 @@ import {
 } from "./storage"
 import { Stroke, type DabTransform, type SampleExtra } from "./stroke"
 import {
+  clearImageAssets,
+  isImageObject,
+  setImageAsset,
   DEFAULT_SHAPE_STYLE,
   DEFAULT_TEXT_STYLE,
   dragHandle,
@@ -540,6 +543,8 @@ export class PaintEngine {
   private symmetrySource: ((docW: number, docH: number) => DabTransform[]) | null = null
   /** Tail of the chain of saves, so they never overlap. */
   private saving: Promise<void> = Promise.resolve()
+  /** Original files behind image fills, by id, kept so they can be saved. */
+  private imageBlobs = new Map<string, Blob>()
   private blobCache = new Map<string, { rev: number; blob: Blob }>()
 
   // ---- store ---------------------------------------------------------------
@@ -670,6 +675,16 @@ export class PaintEngine {
     this.canvases.clear()
     this.masks.clear()
     this.resetSelection()
+    this.imageBlobs.clear()
+    clearImageAssets()
+    for (const meta of doc.layers) {
+      for (const o of meta.vector ?? []) {
+        const blob = o.type === "shape" && o.image ? doc.blobs[`img:${o.image}`] : undefined
+        if (!blob || o.type !== "shape" || !o.image || this.imageBlobs.has(o.image)) continue
+        setImageAsset(o.image, await createImageBitmap(blob))
+        this.imageBlobs.set(o.image, blob)
+      }
+    }
     for (const meta of doc.layers) {
       const c = meta.fx ? makeCanvas(1, 1) : makeCanvas(doc.width, doc.height)
       const blob = meta.vector ? undefined : doc.blobs[meta.id]
@@ -754,6 +769,8 @@ export class PaintEngine {
     this.masks.clear()
     this.resetSelection()
     this.blobCache.clear()
+    this.imageBlobs.clear()
+    clearImageAssets()
     this.layerCounter = 0
     const layer = this.makeLayer()
     this.canvases.set(layer.id, makeCanvas(w, h))
@@ -1223,8 +1240,7 @@ export class PaintEngine {
       this.notify("Adjustment layers have no pixels to edit")
       return
     }
-    if (target === "pixels" && meta?.vector) {
-      this.notify("Rasterise this vector layer to edit its pixels")
+    if (target === "pixels" && meta && !this.pixelLayer(meta, "Rasterise this vector layer to edit its pixels")) {
       return
     }
     this.structural(() => {
@@ -2090,6 +2106,9 @@ export class PaintEngine {
         last: Math.atan2(sy - this.vh / 2, sx - this.vw / 2),
       }
     } else if (isSelectTool(tool) && e.button === 0) {
+      // Selecting an area of pixels treats an image as pixels from then on.
+      const active = this.activeLayer()
+      if (active?.vector?.some(isImageObject)) this.pixelLayer(active, "")
       this.beginSelect(tool, e, id, x, y, sx, sy)
     } else if (e.altKey || e.button === 2 || tool === "eyedropper") {
       this.action = { kind: "pick", pointerId: id }
@@ -2116,10 +2135,7 @@ export class PaintEngine {
         this.notify("Select a paint layer — adjustment layers hold no pixels")
         return
       }
-      if (layer.vector && !onMask) {
-        this.notify("Rasterise this vector layer to paint on it")
-        return
-      }
+      if (!onMask && !this.pixelLayer(layer, "Rasterise this vector layer to paint on it")) return
       if (tool === "move") {
         const sel = this.selection
         const src = this.canvases.get(layer.id)
@@ -3005,10 +3021,7 @@ export class PaintEngine {
       if (!cut) this.duplicateLayer(layer.id)
       return
     }
-    if (cut && layer.vector) {
-      this.notify("Rasterise this vector layer to cut pixels from it")
-      return
-    }
+    if (cut && !this.pixelLayer(layer, "Rasterise this vector layer to cut pixels from it")) return
     this.structural(() => {
       const piece = this.bakedPixels(layer)
       const p = ctxOf(piece)
@@ -3692,6 +3705,67 @@ export class PaintEngine {
     )
   }
 
+  /**
+   * Readies a layer for a pixel edit. An image layer is converted to pixels
+   * on the spot; other vector layers refuse with `refusal`, and false is
+   * returned.
+   */
+  private pixelLayer(layer: LayerMeta, refusal: string): boolean {
+    if (!layer.vector) return true
+    if (!layer.vector.some(isImageObject)) {
+      this.notify(refusal)
+      return false
+    }
+    this.rasterizeLayer(layer.id)
+    this.notify("Image converted to a raster layer")
+    return true
+  }
+
+  /**
+   * Places an image on its own layer as a rectangle with an image fill, so it
+   * can still be moved, resized and rotated. Centred on `at`, or the canvas.
+   */
+  async importImage(file: Blob, name: string, at?: { x: number; y: number }): Promise<boolean> {
+    let image: ImageBitmap
+    try {
+      image = await createImageBitmap(file)
+    } catch {
+      this.notify("That file couldn't be opened as an image")
+      return false
+    }
+    const assetId = uid("img")
+    setImageAsset(assetId, image)
+    this.imageBlobs.set(assetId, file)
+    this.structural(() => {
+      const { layers, activeLayerId, docW, docH } = this.state
+      const k = Math.min(1, docW / image.width, docH / image.height)
+      const w = Math.round(image.width * k)
+      const h = Math.round(image.height * k)
+      const obj: VectorObject = {
+        ...DEFAULT_SHAPE_STYLE,
+        shape: "rect",
+        fill: null,
+        stroke: null,
+        image: assetId,
+        id: uid("obj"),
+        type: "shape",
+        x: Math.round((at?.x ?? docW / 2) - w / 2),
+        y: Math.round((at?.y ?? docH / 2) - h / 2),
+        w,
+        h,
+        rot: 0,
+      }
+      const layer: LayerMeta = { ...this.makeLayer(name || "Image"), vector: [obj] }
+      this.canvases.set(layer.id, makeCanvas(docW, docH))
+      const next = layers.slice()
+      next.splice(layers.findIndex((l) => l.id === activeLayerId) + 1, 0, layer)
+      this.setState({ layers: next, activeLayerId: layer.id, editMask: false, vecSel: obj.id })
+    })
+    // The move tool shows the new image's handles straight away.
+    this.setTool("move")
+    return true
+  }
+
   /** Turns a vector layer into ordinary pixels; its objects stop being editable. */
   rasterizeLayer(id: string) {
     const meta = this.state.layers.find((l) => l.id === id)
@@ -3767,7 +3841,15 @@ export class PaintEngine {
     }
     if (!layer) return fail("")
     if (layer.fx) return fail("Adjustment layers hold no pixels to distort")
-    if (layer.vector) return fail("Rasterise this vector layer to distort it")
+    if (layer.vector && !layer.vector.some(isImageObject)) {
+      return fail("Rasterise this vector layer to distort it")
+    }
+    if (layer.vector) {
+      // Distorting works on pixels, so an image stops being an object here.
+      this.rasterizeLayer(layer.id)
+      this.notify("Image converted to a raster layer")
+      return
+    }
     this.distortGL ??= DistortRenderer.create()
     const { docW, docH, distortMode, warpGrid } = this.state
     if (!this.distortGL || !this.distortGL.fits(docW, docH)) {
@@ -4086,10 +4168,7 @@ export class PaintEngine {
       this.notify("Select a paint layer — adjustment layers hold no pixels")
       return
     }
-    if (layer.vector) {
-      this.notify("Rasterise this vector layer to fill it")
-      return
-    }
+    if (!this.pixelLayer(layer, "Rasterise this vector layer to fill it")) return
     const sel = this.selection
     const rgb = hexToRgb(hsvToHex(this.state.color))
     if (!rgb) return
@@ -4262,6 +4341,12 @@ export class PaintEngine {
     }
     for (const id of [...this.blobCache.keys()]) {
       if (!(id in blobs)) this.blobCache.delete(id)
+    }
+    for (const meta of s.layers) {
+      for (const o of meta.vector ?? []) {
+        const blob = o.type === "shape" && o.image ? this.imageBlobs.get(o.image) : undefined
+        if (blob && o.type === "shape") blobs[`img:${o.image}`] = blob
+      }
     }
     try {
       const thumb = await this.thumbnail()

@@ -20,6 +20,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react"
 import { useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 
 import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
 import { useEngine } from "@/hooks/use-engine"
@@ -326,6 +327,65 @@ function AddEffectMenu({
   )
 }
 
+/** The menu a right-click or long press on a layer brings up. */
+function LayerMenu({
+  layer,
+  at,
+  onClose,
+  onRename,
+}: {
+  layer: LayerMeta
+  at: { x: number; y: number }
+  onClose: () => void
+  onRename: () => void
+}) {
+  useDismiss(true, onClose)
+  const item = (label: string, run: () => void, danger = false) => (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={() => {
+        onClose()
+        run()
+      }}
+      className={cn(
+        "flex h-8 w-full items-center rounded-lg px-2 text-left text-xs text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring",
+        danger && "text-destructive"
+      )}
+    >
+      {label}
+    </button>
+  )
+  // In a portal: the panel's backdrop blur would otherwise trap a fixed box.
+  return createPortal(
+    <div
+      data-popover
+      role="menu"
+      aria-label={`Actions for ${layer.name}`}
+      onContextMenu={(e) => e.preventDefault()}
+      className={cn(panelClass, "fixed z-[80] w-52 p-1.5 select-none")}
+      style={{
+        left: Math.max(8, Math.min(at.x, window.innerWidth - 216)),
+        top: Math.max(8, Math.min(at.y, window.innerHeight - 220)),
+      }}
+    >
+      {layer.vector && (
+        <>
+          {item("Convert to raster layer", () => engine.rasterizeLayer(layer.id))}
+          <div className="mx-2 my-1 h-px bg-white/10" />
+        </>
+      )}
+      {item("Rename", onRename)}
+      {item("Duplicate", () => engine.duplicateLayer(layer.id))}
+      {!layer.fx && item("Merge down", () => engine.mergeDown(layer.id))}
+      {item(layer.visible ? "Hide" : "Show", () => engine.setLayerProps(layer.id, { visible: !layer.visible }))}
+      <div className="mx-2 my-1 h-px bg-white/10" />
+      {item("Delete", () => engine.deleteLayer(layer.id), true)}
+    </div>,
+    document.body
+  )
+}
+
 function LayerRow({
   layer,
   active,
@@ -339,6 +399,9 @@ function LayerRow({
 }) {
   const onMask = active && editMask && !!layer.mask
   const [editing, setEditing] = useState(false)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const press = useRef({ timer: 0, x: 0, y: 0 })
+  const cancelPress = () => window.clearTimeout(press.current.timer)
   const blend = BLEND_MODES.find((b) => b.id === layer.blend)
   const fxDef = layer.fx ? getEffect(layer.fx.type) : undefined
 
@@ -353,7 +416,26 @@ function LayerRow({
         role="button"
         tabIndex={0}
         aria-pressed={active}
+        aria-haspopup="menu"
         onClick={() => engine.setActiveLayer(layer.id)}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          cancelPress()
+          setMenu({ x: e.clientX, y: e.clientY })
+        }}
+        // Touch and pen have no right button: holding still opens the menu.
+        onPointerDown={(e) => {
+          if (e.pointerType === "mouse") return
+          const { clientX: x, clientY: y } = e
+          cancelPress()
+          press.current = { x, y, timer: window.setTimeout(() => setMenu({ x, y }), 550) }
+        }}
+        onPointerMove={(e) => {
+          if (Math.hypot(e.clientX - press.current.x, e.clientY - press.current.y) > 8) cancelPress()
+        }}
+        onPointerUp={cancelPress}
+        onPointerCancel={cancelPress}
+        onPointerLeave={cancelPress}
         onKeyDown={(e) => {
           if (e.key === "Enter" && e.target === e.currentTarget)
             engine.setActiveLayer(layer.id)
@@ -441,6 +523,10 @@ function LayerRow({
           {layer.visible ? <EyeIcon /> : <EyeSlashIcon className="opacity-50" />}
         </IconButton>
       </div>
+
+      {menu && (
+        <LayerMenu layer={layer} at={menu} onClose={() => setMenu(null)} onRename={() => setEditing(true)} />
+      )}
 
       {active && fxDef && <FxControls layer={layer} def={fxDef} />}
 

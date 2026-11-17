@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react"
 
 import { useEngine } from "@/hooks/use-engine"
 import { engine, selectedObject } from "@/paint/engine"
+import { importImages } from "@/paint/palettes"
 import { fontFamily } from "@/paint/vector"
 
 /**
@@ -89,7 +90,25 @@ export function CanvasView() {
   }, [])
 
   return (
-    <div ref={wrapRef} className="absolute inset-0 overflow-hidden">
+    <div
+      ref={wrapRef}
+      className="absolute inset-0 overflow-hidden"
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = "copy"
+      }}
+      onDrop={(e) => {
+        if (e.dataTransfer.files.length === 0) return
+        e.preventDefault()
+        // Each image lands where it was dropped, as an object on its own layer.
+        const r = e.currentTarget.getBoundingClientRect()
+        const [x, y] = engine.screenToDoc(e.clientX - r.left, e.clientY - r.top)
+        void importImages(e.dataTransfer.files, (file, name, i) =>
+          engine.importImage(file, name, { x: x + i * 40, y: y + i * 40 })
+        )
+      }}
+    >
       <canvas
         ref={canvasRef}
         className="absolute inset-0 size-full touch-none outline-none"
