@@ -1,12 +1,12 @@
 import {
-  ArrowsInSimpleIcon,
-  ArrowsOutSimpleIcon,
   CaretDownIcon,
   CircleIcon,
   DiamondIcon,
   EyedropperIcon,
+  SlidersHorizontalIcon,
   SquareIcon,
   TriangleIcon,
+  XIcon,
 } from "@phosphor-icons/react"
 import { useEffect, useRef, useState } from "react"
 import type { ReactNode } from "react"
@@ -128,7 +128,29 @@ function HexField({ hex, className }: { hex: string; className?: string }) {
   )
 }
 
-/** The wheel, sized to the space it is given, with tool buttons in its corners. */
+/** Recent colours as round chips, the compact panel's palette. */
+function Dots({ colors, current }: { colors: string[]; current: string }) {
+  return (
+    <div className="flex shrink-0 flex-wrap gap-1.5">
+      {colors.map((hex) => (
+        <button
+          key={hex}
+          type="button"
+          title={hex}
+          aria-label={`Use colour ${hex}`}
+          onClick={() => engine.setColorHex(hex)}
+          className={cn(
+            "size-6 shrink-0 rounded-full border border-white/10 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            hex === current && "border-2 border-white shadow-[inset_0_0_0_2px_var(--color-card)]"
+          )}
+          style={{ background: hex }}
+        />
+      ))}
+    </div>
+  )
+}
+
+/** The wheel, sized to the space it is given, with tool buttons in its lower corners. */
 function WheelArea({
   color,
   shape,
@@ -159,8 +181,8 @@ function WheelArea({
       {size >= 60 && (
         <ColorWheel color={color} shape={shape} size={size} onChange={(c) => engine.setColor(c)} />
       )}
-      <div className="absolute top-0 left-0">{left}</div>
-      <div className="absolute top-0 right-0">{right}</div>
+      <div className="absolute bottom-0 left-0">{left}</div>
+      <div className="absolute right-0 bottom-0">{right}</div>
     </div>
   )
 }
@@ -299,8 +321,9 @@ export function ColorPanel() {
     <IconButton
       label="Pick a colour from the canvas (I)"
       className={small}
+      soft
       active={s.tool === "eyedropper"}
-      onClick={() => engine.setTool("eyedropper")}
+      onClick={() => engine.pickOnce()}
     >
       <EyedropperIcon />
     </IconButton>
@@ -316,21 +339,35 @@ export function ColorPanel() {
   )
   const expandButton = (
     <IconButton
-      label={colorExpanded ? "Collapse the colour panel" : "Expand the colour panel"}
+      soft
+      label={colorExpanded ? "Back to the compact colour picker" : "More colour options — palettes and values"}
       className={small}
       aria-expanded={colorExpanded}
+      active={colorExpanded}
       onClick={() => layout.toggleColor()}
     >
-      {colorExpanded ? <ArrowsInSimpleIcon /> : <ArrowsOutSimpleIcon />}
+      <SlidersHorizontalIcon />
     </IconButton>
   )
 
   if (!colorExpanded) {
-    const quick = [...new Set([...s.recentColors.slice(0, 8), ...QUICK])].slice(0, 16)
+    const quick = [...new Set([...s.recentColors, ...QUICK])].slice(0, 12)
     return (
-      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-hidden p-3 pt-2">
-        <WheelArea color={color} shape={shape} left={eyedropper} right={expandButton} />
-        <Swatches colors={quick} current={hex} />
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="-mb-2 flex shrink-0 items-center justify-between px-3 pt-1">
+          <span
+            title={hex}
+            className="h-5 w-7 rounded-[6px] border border-white/25"
+            style={{ background: hex }}
+          />
+          <IconButton label="Close the colour panel" className={small} onClick={() => layout.toggle("color")}>
+            <XIcon />
+          </IconButton>
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col gap-6 px-3 pb-3">
+          <WheelArea color={color} shape={shape} left={expandButton} right={eyedropper} />
+          <Dots colors={quick} current={hex} />
+        </div>
       </div>
     )
   }

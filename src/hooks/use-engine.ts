@@ -122,9 +122,6 @@ export function useShortcuts(togglePanels: () => void) {
         case "d":
           engine.setTool("distort")
           break
-        case "h":
-          engine.setTool("hand")
-          break
         case "a":
           engine.setTool("select-rect")
           break

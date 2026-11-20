@@ -12,12 +12,12 @@ import { panelClass } from "@/components/paint/controls"
 import { PanelFrame, SnapGuides, measureInsets, useLayout } from "@/components/paint/layout"
 import { ImportOffer } from "@/components/paint/ImportOffer"
 import { LayersPanel } from "@/components/paint/LayersPanel"
-import { ToolRail } from "@/components/paint/ToolRail"
-import { TopBar } from "@/components/paint/TopBar"
+import { ToolRail, hasRail, optionsKind } from "@/components/paint/ToolRail"
+import { TopBar, ZoomBar } from "@/components/paint/TopBar"
 import { VectorPanel } from "@/components/paint/VectorPanel"
 import { useEngine, useShortcuts } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
-import { engine, isPaintTool, selectedObject } from "@/paint/engine"
+import { engine, isPaintTool } from "@/paint/engine"
 
 function Toast() {
   const { notice } = useEngine()
@@ -54,7 +54,7 @@ export function App() {
   const closeGallery = useCallback(() => setGallery(false), [])
   const state = useEngine()
   const { tool } = state
-  const vector = tool === "shape" || tool === "text" || !!selectedObject(state)
+  const options = optionsKind(state)
   useShortcuts(togglePanels)
 
   const lay = useLayout()
@@ -70,28 +70,29 @@ export function App() {
       <CanvasView />
       <AidsOverlay />
       <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} onOpenGallery={openGallery} />
+      {!hidden.viewControls && <ZoomBar />}
 
       {panelsOpen && (
         <>
-          {!hidden.tools && (
-            <PanelFrame id="tools" label="Tools" bare resizable={false}>
+          {!hidden.tools && hasRail(state) && (
+            <PanelFrame id="tools" label="Tool options" resizable={false}>
               <ToolRail />
             </PanelFrame>
           )}
           {!hidden.color && (
-            <PanelFrame id="color" label="Colour" minW={220} minH={lay.colorExpanded ? 380 : 220}>
+            <PanelFrame id="color" label="Colour" minW={200} minH={lay.colorExpanded ? 380 : 240}>
               <ColorPanel />
             </PanelFrame>
           )}
-          {!hidden.options && (
+          {!hidden.options && options && (
             <PanelFrame
               id="options"
-              label={tool === "distort" ? "Distort" : vector ? "Object" : "Brushes"}
-              minW={260}
+              label={options === "distort" ? "Transform" : options === "object" ? "Object" : "Brushes"}
+              minW={options === "brush" ? 220 : 260}
             >
-              {tool === "distort" ? (
+              {options === "distort" ? (
                 <DistortPanel />
-              ) : vector ? (
+              ) : options === "object" ? (
                 <VectorPanel />
               ) : (
                 <BrushPanel onOpenStudio={() => setStudio(true)} />

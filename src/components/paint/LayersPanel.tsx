@@ -1,10 +1,8 @@
 import {
   ArrowCounterClockwiseIcon,
   ArrowElbowDownRightIcon,
-  ArrowLineDownIcon,
   CaretDownIcon,
   CaretRightIcon,
-  CaretUpIcon,
   FolderIcon,
   FolderPlusIcon,
   CheckIcon,
@@ -27,8 +25,9 @@ import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 
 import checkerImg from "@/assets/layer-checker.png"
+import filtersIcon from "@/assets/icons/filters.svg"
 
-import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
+import { IconButton, MaskIcon, Slider, panelClass, useDismiss } from "@/components/paint/controls"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import {
@@ -46,7 +45,6 @@ import {
   BLEND_MODES,
   engine,
   layerDepth,
-  moveBlock,
   moveBlocks,
   outermostLayers,
   type BlendMode,
@@ -788,7 +786,6 @@ function LayerRow({
 export function LayersPanel() {
   const s = useEngine()
   const id = s.activeLayerId
-  const idx = s.layers.findIndex((l) => l.id === id)
   const aspect = s.docW / s.docH
   const [fxMenu, setFxMenu] = useState(false)
   useDismiss(fxMenu, () => setFxMenu(false))
@@ -938,18 +935,9 @@ export function LayersPanel() {
           </div>
         </>
       )}
-      <div className="flex flex-wrap items-center justify-end gap-0.5 px-2 pt-1.5 pb-1 @max-[189px]:justify-center">
-        <h2 className="mr-auto pl-1 @max-[189px]:hidden text-xs font-semibold tracking-wide text-foreground uppercase">
-          Layers
-        </h2>
-        <IconButton label="Move layer up" className="size-7" disabled={!moveBlock(s.layers, id, 1)} onClick={() => engine.moveLayer(id, 1)}>
-          <CaretUpIcon />
-        </IconButton>
-        <IconButton label="Move layer down" className="size-7" disabled={!moveBlock(s.layers, id, -1)} onClick={() => engine.moveLayer(id, -1)}>
-          <CaretDownIcon />
-        </IconButton>
-        <IconButton label="Merge down" className="size-7" disabled={idx <= 0} onClick={() => engine.mergeDown(id)}>
-          <ArrowLineDownIcon />
+      <div className="flex items-center justify-between px-3.5 py-1.5 @max-[159px]:flex-wrap @max-[159px]:justify-center @max-[159px]:px-1">
+        <IconButton label="New layer" className="size-7" onClick={() => engine.addLayer()}>
+          <PlusIcon />
         </IconButton>
         <IconButton label="Duplicate layer" className="size-7" onClick={() => engine.duplicateLayer(id)}>
           <CopyIcon />
@@ -957,19 +945,17 @@ export function LayersPanel() {
         <IconButton label="Delete layer" className="size-7" onClick={() => engine.deleteLayer(id)}>
           <TrashIcon />
         </IconButton>
-        <IconButton label="Add effect or adjustment layer" data-popover className="size-7" active={fxMenu} onClick={() => setFxMenu(!fxMenu)}>
-          <SlidersHorizontalIcon />
+        <IconButton label="Add a filter — effect or adjustment layer" data-popover className="size-7" soft active={fxMenu} onClick={() => setFxMenu(!fxMenu)}>
+          <MaskIcon src={filtersIcon} />
         </IconButton>
         <IconButton
           label={selection.length > 1 ? `Group ${selection.length} selected layers (Cmd/Ctrl+G)` : "New group"}
           className="size-7"
+          soft
           active={selection.length > 1}
           onClick={() => (selection.length > 1 ? groupSelection() : engine.addGroup())}
         >
           <FolderPlusIcon />
-        </IconButton>
-        <IconButton label="New layer" className="size-7 bg-white/10 text-foreground" onClick={() => engine.addLayer()}>
-          <PlusIcon />
         </IconButton>
       </div>
 
@@ -983,7 +969,7 @@ export function LayersPanel() {
             if (active?.group) engine.ungroup(id)
           } else groupSelection()
         }}
-        className={cn("min-h-0 flex-1 overflow-y-auto px-2 [scrollbar-width:thin]", drag && "select-none")}
+        className={cn("min-h-0 flex-1 overflow-y-auto bg-black/30 px-2 pt-2 [scrollbar-width:thin]", drag && "select-none")}
       >
         {rows.map((l) => (
           <LayerRow
@@ -1008,23 +994,23 @@ export function LayersPanel() {
         <div className="h-8" />
       </div>
 
-      <div className="flex items-center gap-2 border-t border-white/8 px-3 py-2">
+      <div className="flex items-center gap-2 border-t border-white/10 p-2">
         <label
-          className="relative size-6 shrink-0 overflow-hidden rounded-md border border-white/15"
+          className="relative size-6 shrink-0 overflow-hidden rounded-[6px] border border-white/10"
           style={{ background: s.showBackground ? s.background : checker }}
-          title="Paper colour"
+          title="Background colour"
         >
           <input
             type="color"
-            aria-label="Paper colour"
+            aria-label="Background colour"
             value={s.background}
             onChange={(e) => engine.setBackground(e.target.value)}
             className="absolute inset-0 size-full cursor-pointer opacity-0"
           />
         </label>
-        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground @max-[189px]:invisible">Paper</span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground @max-[189px]:invisible">Background</span>
         <IconButton
-          label={s.showBackground ? "Hide paper (transparent)" : "Show paper"}
+          label={s.showBackground ? "Hide background (transparent)" : "Show background"}
           className="size-7"
           onClick={() => engine.setShowBackground(!s.showBackground)}
         >

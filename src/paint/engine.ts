@@ -738,6 +738,8 @@ export class PaintEngine {
   private redoStack: UndoEntry[] = []
 
   private action: Action | null = null
+  /** Tool to return to after a one-shot eyedropper pick. */
+  private pickReturn: ToolId | null = null
   private gesture: Gesture | null = null
   private touches = new Map<number, { x: number; y: number }>()
   private spaceDown = false
@@ -1666,6 +1668,7 @@ export class PaintEngine {
   // ---- tools & colour ------------------------------------------------------
 
   setTool(tool: ToolId) {
+    this.pickReturn = null
     this.commitText()
     if (this.poly) this.poly = null
     if (tool !== "distort" && this.state.tool === "distort") {
@@ -1685,6 +1688,22 @@ export class PaintEngine {
     if (entering) this.beginDistort()
     this.requestRender()
     this.updateCursor()
+  }
+
+  /**
+   * Eyedropper for a single pick: the next click on the canvas takes a colour
+   * and the previous tool comes back. Pressing it again cancels.
+   */
+  pickOnce() {
+    const { tool } = this.state
+    if (tool === "eyedropper") {
+      const back = this.pickReturn ?? "brush"
+      this.pickReturn = null
+      this.setTool(back)
+      return
+    }
+    this.setTool("eyedropper")
+    this.pickReturn = tool
   }
 
   /** New shapes and text start out in the current colour. */
@@ -2897,6 +2916,14 @@ export class PaintEngine {
       }
       case "move":
         if (a.dx !== 0 || a.dy !== 0) this.commitMove(a)
+        break
+      case "pick":
+        // The colour panel's eyedropper picks once, then hands back the tool.
+        if (this.pickReturn && this.state.tool === "eyedropper") {
+          const back = this.pickReturn
+          this.pickReturn = null
+          this.setTool(back)
+        }
         break
       case "marquee": {
         const [sx, sy] = this.local(e)

@@ -19,18 +19,22 @@ export type ViewItem = PanelId | ControlId
 
 /** Gap kept to the window edge, between snapped panels, and below the top bar. */
 const MARGIN = 12
-const GAP = 8
-const TOP = 76
+const GAP = 12
+const TOP = 72
 const SNAP = 10
-const KEY = "pigment.layout.v1"
+const KEY = "pigment.layout.v2"
+/** Widths of the right-hand column (colour, layers) and the brush library. */
+const SIDE_W = 206
+const OPTIONS_W = 260
+const COLOR_H = 316
 const PANEL_IDS: PanelId[] = ["tools", "color", "options", "layers", "aids"]
 
 interface Placement {
   /** Horizontal anchor edge and the distance to it. */
   ax: "l" | "r"
   x: number
-  /** Vertical anchor: top, bottom, or stretched between both. */
-  ay: "t" | "b" | "s"
+  /** Vertical anchor: top, bottom, stretched between both, or centred. */
+  ay: "t" | "b" | "s" | "c"
   t: number
   b: number
   w: number
@@ -54,16 +58,15 @@ export interface LayoutState {
 
 function defaults(): LayoutState {
   const vh = typeof window === "undefined" ? 900 : window.innerHeight
-  const colorH = vh < 800 ? 300 : 346
-  const optionsT = TOP + colorH + GAP
-  const optionsH = Math.max(170, Math.round((vh - optionsT - MARGIN - GAP) * 0.46))
-  const side = { ax: "r", x: MARGIN, w: 292, b: MARGIN } as const
+  // Colour and layers stack down the right edge; the brush library hangs
+  // full height beside them; the contextual tool rail sits mid-left.
+  const side = { ax: "r", x: MARGIN, w: SIDE_W, b: MARGIN } as const
   return {
     panels: {
-      tools: { ax: "l", x: MARGIN, ay: "t", t: TOP, b: MARGIN, w: 52, h: 0, tight: true },
-      color: { ...side, ay: "t", t: TOP, h: colorH, tight: true },
-      options: { ...side, ay: "t", t: optionsT, h: optionsH },
-      layers: { ...side, ay: "s", t: optionsT + optionsH + GAP, h: 200 },
+      tools: { ax: "l", x: MARGIN, ay: "c", t: TOP, b: MARGIN, w: 50, h: 0 },
+      color: { ...side, ay: "t", t: TOP, h: COLOR_H, tight: true },
+      options: { ax: "r", x: MARGIN + SIDE_W + GAP, ay: "s", t: TOP, b: MARGIN, w: OPTIONS_W, h: vh - TOP - MARGIN, tight: true },
+      layers: { ...side, ay: "s", t: TOP + COLOR_H + GAP, h: 200 },
       aids: { ax: "l", x: 70, ay: "t", t: TOP, b: MARGIN, w: 280, h: Math.min(560, vh - TOP - MARGIN), tight: true },
     },
     order: [...PANEL_IDS],
@@ -134,7 +137,7 @@ export const layout = {
     const colorExpanded = !state.colorExpanded
     // Each view remembers its own height; the expanded one opens over
     // whatever sits below, so it comes to the front.
-    const h = p.alt ?? (colorExpanded ? 600 : 300)
+    const h = p.alt ?? (colorExpanded ? 600 : COLOR_H)
     commit({
       ...state,
       colorExpanded,
@@ -190,6 +193,9 @@ function placementStyle(p: Placement, resizable: boolean): React.CSSProperties {
   if (p.ay === "s") {
     s.top = p.t
     s.bottom = p.b
+  } else if (p.ay === "c") {
+    s.top = "50%"
+    s.transform = "translateY(-50%)"
   } else if (p.ay === "t") {
     s.top = `clamp(${TOP}px, ${p.t}px, calc(100% - ${p.h + MARGIN}px))`
   } else {

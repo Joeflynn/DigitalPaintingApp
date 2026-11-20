@@ -1,230 +1,200 @@
 import {
   ArrowsOutCardinalIcon,
+  DropIcon,
   EraserIcon,
-  EyedropperIcon,
   GridNineIcon,
-  HandIcon,
   HandPointingIcon,
-  SparkleIcon,
   PaintBrushIcon,
   PaintBucketIcon,
+  PerspectiveIcon,
+  SelectionIcon,
+  ShapesIcon,
   TextTIcon,
 } from "@phosphor-icons/react"
-import { useState, type ReactNode } from "react"
+import type { ReactNode } from "react"
 
-import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
+import { IconButton, Slider } from "@/components/paint/controls"
 import { SELECT_TOOL_INFO } from "@/components/paint/select-tools"
 import { SHAPE_ICONS } from "@/components/paint/VectorPanel"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE } from "@/paint/brushes"
-import { hsvToHex } from "@/paint/color"
-import { engine, isPaintTool, isSelectTool, type ToolId } from "@/paint/engine"
+import type { DistortMode } from "@/paint/distort"
+import {
+  engine,
+  isPaintTool,
+  isSelectTool,
+  selectedObject,
+  type EngineState,
+  type ToolId,
+} from "@/paint/engine"
 import { SHAPE_KINDS } from "@/paint/vector"
 
-const TOOLS: { id: ToolId; label: string; icon: ReactNode }[] = [
-  { id: "brush", label: "Brush (B)", icon: <PaintBrushIcon /> },
-  { id: "smudge", label: "Smudge (S)", icon: <HandPointingIcon /> },
-  { id: "eraser", label: "Eraser (E)", icon: <EraserIcon /> },
-  { id: "fx", label: "Effect brush — paint an effect onto the canvas (K)", icon: <SparkleIcon /> },
-  { id: "fill", label: "Fill (G)", icon: <PaintBucketIcon /> },
-  { id: "eyedropper", label: "Eyedropper (I, or hold Alt)", icon: <EyedropperIcon /> },
+/**
+ * The main tools, centred in the top bar. Several tools stand for a family:
+ * the brush also covers effect brushes (picked in the brush library), select
+ * covers every selection tool, and move covers the transform modes —
+ * perspective, warp and liquify — whose choice sits in the side rail.
+ */
+const MAIN: { id: ToolId; label: string; icon: ReactNode; on: (t: ToolId) => boolean }[] = [
+  { id: "brush", label: "Brush (B)", icon: <PaintBrushIcon />, on: (t) => t === "brush" || t === "fx" },
+  { id: "smudge", label: "Smudge (S)", icon: <HandPointingIcon />, on: (t) => t === "smudge" },
+  { id: "eraser", label: "Eraser (E)", icon: <EraserIcon />, on: (t) => t === "eraser" },
+  { id: "fill", label: "Fill (G)", icon: <PaintBucketIcon />, on: (t) => t === "fill" },
+  { id: "shape", label: "Shape (U)", icon: <ShapesIcon />, on: (t) => t === "shape" },
+  { id: "text", label: "Text (T)", icon: <TextTIcon />, on: (t) => t === "text" },
+  { id: "select-rect", label: "Select (A, L, P, Q, W)", icon: <SelectionIcon />, on: isSelectTool },
+  {
+    id: "move",
+    label: "Move & transform — perspective, warp, liquify (V, D)",
+    icon: <ArrowsOutCardinalIcon />,
+    on: (t) => t === "move" || t === "distort",
+  },
 ]
 
-const VIEW_TOOLS: typeof TOOLS = [
-  { id: "move", label: "Move layer, selection or object (V)", icon: <ArrowsOutCardinalIcon /> },
-  { id: "hand", label: "Pan (H, or hold Space)", icon: <HandIcon /> },
-]
-
-/** One rail button for all the selection tools, with a flyout to pick one. */
-function SelectButton() {
+export function MainTools() {
   const s = useEngine()
-  const [open, setOpen] = useState(false)
-  const active = isSelectTool(s.tool)
-  useDismiss(open, () => setOpen(false))
-  const current = SELECT_TOOL_INFO.find((t) => t.id === s.selectTool)!
-
   return (
-    <div className="relative">
-      <IconButton
-        label={`${current.label} — click again for more selection tools`}
-        active={active}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        data-popover
-        onClick={() => {
-          if (!active) engine.setTool(s.selectTool)
-          setOpen(!open)
-        }}
-      >
-        {current.icon}
-        <span className="pointer-events-none absolute right-1 bottom-1 size-0 border-4 border-transparent border-r-current border-b-current opacity-70" />
-      </IconButton>
-      {open && (
-        <>
-          <div
-            role="menu"
-            data-popover
-            className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5 group-data-[side=r]/panel:right-full group-data-[side=r]/panel:left-auto group-data-[side=r]/panel:mr-3 group-data-[side=r]/panel:ml-0")}
-          >
-            {SELECT_TOOL_INFO.map((t) => (
-              <IconButton
-                key={t.id}
-                label={t.label}
-                active={s.tool === t.id}
-                onClick={() => {
-                  engine.setTool(t.id)
-                  setOpen(false)
-                }}
-              >
-                {t.icon}
-              </IconButton>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-/** One rail button for the shape tool, with a flyout to pick the shape. */
-function ShapeButton() {
-  const s = useEngine()
-  const [open, setOpen] = useState(false)
-  const active = s.tool === "shape"
-  const kind = s.shapeStyle.shape
-  useDismiss(open, () => setOpen(false))
-
-  return (
-    <div className="relative">
-      <IconButton
-        label={`${SHAPE_KINDS.find((k) => k.id === kind)?.label} (U) — click again for more shapes`}
-        active={active}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        data-popover
-        onClick={() => {
-          if (!active) engine.setTool("shape")
-          setOpen(!open)
-        }}
-      >
-        {SHAPE_ICONS[kind]}
-        <span className="pointer-events-none absolute right-1 bottom-1 size-0 border-4 border-transparent border-r-current border-b-current opacity-70" />
-      </IconButton>
-      {open && (
-        <div
-          role="menu"
-          data-popover
-          className={cn(panelClass, "absolute top-1/2 left-full z-50 ml-3 flex -translate-y-1/2 gap-1 p-1.5 group-data-[side=r]/panel:right-full group-data-[side=r]/panel:left-auto group-data-[side=r]/panel:mr-3 group-data-[side=r]/panel:ml-0")}
+    <div className="flex items-center gap-1">
+      {MAIN.map((t) => (
+        <IconButton
+          key={t.id}
+          label={t.label}
+          active={t.on(s.tool)}
+          onClick={() => {
+            // Brush while painting an effect goes back to the plain brush.
+            if (t.on(s.tool) && !(t.id === "brush" && s.tool === "fx")) return
+            // Return to the selection tool last used rather than always the rectangle.
+            engine.setTool(t.id === "select-rect" ? s.selectTool : t.id)
+          }}
         >
-          {SHAPE_KINDS.map((k) => (
-            <IconButton
-              key={k.id}
-              label={k.label}
-              active={active && kind === k.id}
-              onClick={() => {
-                engine.setShapeKind(k.id)
-                setOpen(false)
-              }}
-            >
-              {SHAPE_ICONS[k.id]}
-            </IconButton>
-          ))}
-        </div>
-      )}
+          {t.icon}
+        </IconButton>
+      ))}
     </div>
   )
 }
 
+const TRANSFORM: { mode: DistortMode | null; label: string; icon: ReactNode }[] = [
+  { mode: null, label: "Move (V)", icon: <ArrowsOutCardinalIcon /> },
+  { mode: "perspective", label: "Perspective", icon: <PerspectiveIcon /> },
+  { mode: "warp", label: "Warp (D)", icon: <GridNineIcon /> },
+  { mode: "liquify", label: "Liquify", icon: <DropIcon /> },
+]
+
+/** Whether the active tool has anything to show in the side rail. */
+export function hasRail(s: EngineState) {
+  return (
+    isPaintTool(s.tool) ||
+    isSelectTool(s.tool) ||
+    s.tool === "shape" ||
+    s.tool === "move" ||
+    s.tool === "distort"
+  )
+}
+
+/** Which options panel the active tool has, if any. */
+export function optionsKind(s: EngineState): "brush" | "object" | "distort" | null {
+  if (s.tool === "distort") return "distort"
+  if (s.tool === "shape" || s.tool === "text" || selectedObject(s)) return "object"
+  if (isPaintTool(s.tool)) return "brush"
+  return null
+}
+
+/** Height of each size/opacity slider: tall when there is room, shorter on small windows. */
+const sliderHeight = "h-[clamp(96px,calc((100svh-280px)/2),280px)]"
+
+/**
+ * The contextual side rail: brush size and opacity for the painting tools,
+ * otherwise the variants of the active tool.
+ */
 export function ToolRail({ className }: { className?: string }) {
   const s = useEngine()
-  const tool = isPaintTool(s.tool) ? s.tool : "brush"
-  const settings = s.toolSettings[tool]
+  const tool = s.tool
+  const wrap = cn("flex flex-col items-center gap-1.5 p-1.5 pt-1", className)
 
-  return (
-    <div className={cn("flex flex-col items-center gap-2", className)}>
-      <div className={cn(panelClass, "flex flex-col gap-1 p-1.5")}>
-        {TOOLS.map((t) => (
-          <IconButton
-            key={t.id}
-            label={t.label}
-            active={s.tool === t.id}
-            onClick={() => engine.setTool(t.id)}
-          >
-            {t.icon}
-          </IconButton>
-        ))}
-        <ShapeButton />
-        <IconButton label="Text (T)" active={s.tool === "text"} onClick={() => engine.setTool("text")}>
-          <TextTIcon />
-        </IconButton>
-        <IconButton label="Distort — warp, perspective, liquify (D)" active={s.tool === "distort"} onClick={() => engine.setTool("distort")}>
-          <GridNineIcon />
-        </IconButton>
-        <SelectButton />
-        {VIEW_TOOLS.map((t) => (
-          <IconButton
-            key={t.id}
-            label={t.label}
-            active={s.tool === t.id}
-            onClick={() => engine.setTool(t.id)}
-          >
-            {t.icon}
-          </IconButton>
-        ))}
-      </div>
-
-      <div className={cn(panelClass, "flex flex-col items-center gap-1.5 p-1.5")}>
-        <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-          Size
-        </span>
+  if (isPaintTool(tool)) {
+    const settings = s.toolSettings[tool]
+    const strength = tool === "smudge" || tool === "fx"
+    return (
+      <div className={wrap}>
         <Slider
           vertical
-          label="Brush size"
-          className="h-28"
+          label={`Brush size: ${Math.round(settings.size)} px`}
+          className={sliderHeight}
           min={MIN_BRUSH_SIZE}
           max={MAX_BRUSH_SIZE}
           exp={2.4}
           value={settings.size}
           onChange={(v) => engine.setToolSettings(tool, { size: Math.round(v) })}
         />
-        <span className="text-[11px] text-foreground tabular-nums">
-          {Math.round(settings.size)}
-        </span>
-        <div className="my-0.5 h-px w-6 bg-white/10" />
-        <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-          {tool === "smudge" || tool === "fx" ? "Str" : "Opac"}
-        </span>
+        <div className="py-1.5">
+          <div className="h-px w-6 bg-white/10" />
+        </div>
         <Slider
           vertical
-          label={tool === "smudge" ? "Smudge strength" : tool === "fx" ? "Effect strength" : "Brush opacity"}
-          className="h-28"
+          label={`${strength ? (tool === "fx" ? "Effect strength" : "Smudge strength") : "Brush opacity"}: ${Math.round(settings.opacity * 100)}%`}
+          className={sliderHeight}
           min={0.01}
           max={1}
           value={settings.opacity}
           onChange={(v) => engine.setToolSettings(tool, { opacity: v })}
         />
-        <span className="text-[11px] text-foreground tabular-nums">
-          {Math.round(settings.opacity * 100)}%
-        </span>
       </div>
+    )
+  }
 
-      <button
-        type="button"
-        title="Swap with previous colour (X)"
-        aria-label="Swap with previous colour"
-        onClick={() => engine.swapColors()}
-        className={cn(panelClass, "relative size-12 outline-none focus-visible:ring-2 focus-visible:ring-ring")}
-      >
-        <span
-          className="absolute right-2 bottom-2 size-5 rounded-full border border-white/25"
-          style={{ background: hsvToHex(s.prevColor) }}
-        />
-        <span
-          className="absolute top-2 left-2 size-6 rounded-full border-2 border-white/80 shadow-md"
-          style={{ background: hsvToHex(s.color) }}
-        />
-      </button>
-    </div>
-  )
+  if (isSelectTool(tool)) {
+    return (
+      <div className={wrap}>
+        {SELECT_TOOL_INFO.map((t) => (
+          <IconButton key={t.id} soft label={t.label} active={tool === t.id} onClick={() => engine.setTool(t.id)}>
+            {t.icon}
+          </IconButton>
+        ))}
+      </div>
+    )
+  }
+
+  if (tool === "shape") {
+    const kind = s.shapeStyle.shape
+    return (
+      <div className={wrap}>
+        {SHAPE_KINDS.map((k) => (
+          <IconButton key={k.id} soft label={k.label} active={kind === k.id} onClick={() => engine.setShapeKind(k.id)}>
+            {SHAPE_ICONS[k.id]}
+          </IconButton>
+        ))}
+      </div>
+    )
+  }
+
+  if (tool === "move" || tool === "distort") {
+    return (
+      <div className={wrap}>
+        {TRANSFORM.map((t) => {
+          const on = t.mode === null ? tool === "move" : tool === "distort" && s.distortMode === t.mode
+          return (
+            <IconButton
+              key={t.label}
+              soft
+              label={t.label}
+              active={on}
+              onClick={() => {
+                if (on) return
+                if (t.mode === null) return engine.setTool("move")
+                // Set the mode first so entering the tool builds the right mesh.
+                engine.setDistortOptions({ distortMode: t.mode })
+                engine.setTool("distort")
+              }}
+            >
+              {t.icon}
+            </IconButton>
+          )
+        })}
+      </div>
+    )
+  }
+
+  return null
 }

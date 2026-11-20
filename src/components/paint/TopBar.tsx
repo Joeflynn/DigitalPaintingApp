@@ -1,112 +1,43 @@
 import {
   ArrowClockwiseIcon,
   ArrowCounterClockwiseIcon,
-  ArrowsInSimpleIcon,
+  ArrowsInIcon,
   CaretDownIcon,
   CheckIcon,
-  LayoutIcon,
-  IntersectIcon,
-  SelectionAllIcon,
-  SelectionIcon,
-  SubtractIcon,
-  UniteIcon,
-  CompassIcon,
   CompassToolIcon,
-  DownloadSimpleIcon,
-  FilePlusIcon,
   FlipHorizontalIcon,
   FlipVerticalIcon,
-  ImageIcon,
+  IntersectIcon,
   KeyboardIcon,
   MinusIcon,
   PlusIcon,
-  SidebarSimpleIcon,
+  SelectionIcon,
   SquaresFourIcon,
+  StackIcon,
+  SubtractIcon,
+  UniteIcon,
 } from "@phosphor-icons/react"
 import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 
-import { IconButton, Slider, panelClass, useDismiss } from "@/components/paint/controls"
-import { layout, useLayout, type ViewItem } from "@/components/paint/layout"
+import brushPanelIcon from "@/assets/icons/brush-panel.svg"
+import {
+  IconButton,
+  MaskIcon,
+  Slider,
+  captionClass,
+  dropdownTriggerClass,
+  panelClass,
+  useDismiss,
+} from "@/components/paint/controls"
+import { layout, useLayout, type PanelId, type ViewItem } from "@/components/paint/layout"
 import { SELECT_TOOL_INFO } from "@/components/paint/select-tools"
+import { MainTools, optionsKind } from "@/components/paint/ToolRail"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
-import { getBrush } from "@/paint/brushes"
+import { hsvToHex } from "@/paint/color"
 import { importImages } from "@/paint/palettes"
-import { AddEffectMenu } from "@/components/paint/LayersPanel"
-import {
-  engine,
-  fxChoiceLabel,
-  isPaintTool,
-  isSelectTool,
-  type SelectMode,
-  type SelectModify,
-} from "@/paint/engine"
-
-/** Effect brush: which effect it paints, and whether it reveals or hides it. */
-function EffectBrushContext() {
-  const s = useEngine()
-  const [open, setOpen] = useState(false)
-  useDismiss(open, () => setOpen(false))
-  // Read from the state so this follows the active layer.
-  const group = s.layers.length ? engine.effectGroup() : null
-  const label = "text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
-  const mode = (hide: boolean, text: string, title: string) => (
-    <button
-      type="button"
-      title={title}
-      aria-pressed={s.fxHide === hide}
-      onClick={() => engine.setFxHide(hide)}
-      className={cn(
-        "h-6 rounded-md px-2 text-[11px] font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-        s.fxHide === hide && "bg-white/15 text-foreground"
-      )}
-    >
-      {text}
-    </button>
-  )
-  return (
-    <>
-      <div className="mx-1 h-5 w-px shrink-0 bg-white/10" />
-      <span className={label}>Effect</span>
-      <div className="relative">
-        <button
-          type="button"
-          data-popover
-          aria-haspopup="menu"
-          aria-expanded={open}
-          title="Choose an effect: it gets its own group, ready to paint in"
-          onClick={() => setOpen(!open)}
-          className="flex h-7 max-w-44 items-center gap-1 rounded-lg border border-white/10 bg-black/30 px-2 text-[11px] text-foreground outline-none hover:border-white/30 focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <span className="truncate">{group ? group.name : fxChoiceLabel(s.fxChoice)}</span>
-          <CaretDownIcon className="size-3 shrink-0 opacity-70" />
-        </button>
-        {open && (
-          <div data-popover className={cn(panelClass, "absolute top-full left-0 z-50 mt-2 w-64 p-2")}>
-            <AddEffectMenu
-              onPick={(id) => {
-                engine.setFxChoice({ kind: "fx", id })
-                setOpen(false)
-              }}
-              onLook={(id) => {
-                engine.setFxChoice({ kind: "look", id })
-                setOpen(false)
-              }}
-            />
-          </div>
-        )}
-      </div>
-      <div className="flex items-center rounded-lg bg-black/30 p-0.5" role="group" aria-label="Effect brush mode">
-        {mode(false, "Reveal", "Paint the effect in")}
-        {mode(true, "Hide", "Paint the effect back out")}
-      </div>
-      <span className="hidden text-[11px] text-muted-foreground xl:inline">
-        {group ? "Painting this group's mask" : "The first stroke adds an effect group"}
-      </span>
-    </>
-  )
-}
+import { engine, fxChoiceLabel, isPaintTool, isSelectTool, type SelectMode, type SelectModify } from "@/paint/engine"
 
 const PRESETS = [
   { label: "Landscape", w: 2000, h: 1400 },
@@ -119,7 +50,9 @@ const PRESETS = [
 const SHORTCUTS: [string, string][] = [
   ["B / E / S", "Brush, eraser, smudge"],
   ["K", "Effect brush"],
-  ["G / I / V / H", "Fill, eyedropper, move, pan"],
+  ["G / I", "Fill, eyedropper"],
+  ["V / D", "Move, warp"],
+  ["U / T", "Shape, text"],
   ["A / L / P", "Rectangle, lasso, polygon select"],
   ["Q / W", "Selection brush, magic wand"],
   ["Shift / Alt + select", "Add to / subtract from selection"],
@@ -232,151 +165,6 @@ export function NewCanvasMenu({ onDone }: { onDone: () => void }) {
   )
 }
 
-const MODES: { id: SelectMode; label: string; icon: ReactNode }[] = [
-  { id: "replace", label: "New selection", icon: <SelectionIcon /> },
-  { id: "add", label: "Add to selection (Shift)", icon: <UniteIcon /> },
-  { id: "subtract", label: "Subtract from selection (Alt)", icon: <SubtractIcon /> },
-  { id: "intersect", label: "Intersect with selection (Shift+Alt)", icon: <IntersectIcon /> },
-]
-
-function Toggle({
-  on,
-  onChange,
-  children,
-  title,
-}: {
-  on: boolean
-  onChange: (on: boolean) => void
-  children: ReactNode
-  title?: string
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-pressed={on}
-      onClick={() => onChange(!on)}
-      className={cn(
-        "h-7 shrink-0 rounded-lg px-2 text-[11px] text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-        on && "bg-primary/35 text-foreground hover:bg-primary/35"
-      )}
-    >
-      {children}
-    </button>
-  )
-}
-
-function SelectContext() {
-  const s = useEngine()
-  const label = "text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
-  const value = "w-6 text-[11px] text-foreground tabular-nums"
-  const sampleAll = (
-    <Toggle
-      on={s.sampleAll}
-      onChange={(on) => engine.setSelectOptions({ sampleAll: on })}
-      title="Judge colours from the whole picture rather than only the active layer"
-    >
-      All layers
-    </Toggle>
-  )
-  return (
-    <>
-      <div className="flex items-center">
-        {MODES.map((m) => (
-          <IconButton
-            key={m.id}
-            label={m.label}
-            className="size-7"
-            active={s.selMode === m.id}
-            onClick={() => engine.setSelectOptions({ selMode: m.id })}
-          >
-            {m.icon}
-          </IconButton>
-        ))}
-      </div>
-      <Divider />
-      {s.tool === "select-wand" && (
-        <>
-          <span className={label}>Tolerance</span>
-          <Slider
-            label="Wand tolerance"
-            className="w-20"
-            min={0}
-            max={255}
-            exp={2}
-            value={s.wandTolerance}
-            onChange={(v) => engine.setSelectOptions({ wandTolerance: v })}
-          />
-          <span className={value}>{s.wandTolerance}</span>
-          <Toggle
-            on={s.wandContiguous}
-            onChange={(on) => engine.setSelectOptions({ wandContiguous: on })}
-            title="Select only the connected area, not every matching pixel"
-          >
-            Contiguous
-          </Toggle>
-          {sampleAll}
-        </>
-      )}
-      {s.tool === "select-brush" && (
-        <>
-          <span className={label}>Size</span>
-          <Slider
-            label="Selection brush size"
-            className="w-20"
-            min={4}
-            max={600}
-            exp={2.4}
-            value={s.selBrushSize}
-            onChange={(v) => engine.setSelectOptions({ selBrushSize: v })}
-          />
-          <span className={value}>{s.selBrushSize}</span>
-          <Toggle
-            on={s.selBrushEdge}
-            onChange={(on) => engine.setSelectOptions({ selBrushEdge: on })}
-            title="Spread the selection up to nearby edges by following contrast"
-          >
-            Snap to edges
-          </Toggle>
-          {s.selBrushEdge && (
-            <>
-              <span className={label}>Contrast</span>
-              <Slider
-                label="Edge contrast tolerance"
-                className="w-16"
-                min={1}
-                max={100}
-                value={s.selBrushContrast}
-                onChange={(v) => engine.setSelectOptions({ selBrushContrast: v })}
-              />
-              <span className={value}>{s.selBrushContrast}</span>
-              {sampleAll}
-            </>
-          )}
-        </>
-      )}
-      {s.tool !== "select-wand" && s.tool !== "select-brush" && (
-        <>
-          <span className={label}>Feather</span>
-          <Slider
-            label="Feather new selections"
-            className="w-24"
-            min={0}
-            max={100}
-            exp={2}
-            value={s.selFeather}
-            onChange={(v) => engine.setSelectOptions({ selFeather: Math.round(v) })}
-          />
-          <span className={value}>{s.selFeather}</span>
-          <span className="hidden text-[11px] text-muted-foreground xl:inline">
-            {SELECT_TOOL_INFO.find((t) => t.id === s.tool)?.hint}
-          </span>
-        </>
-      )}
-    </>
-  )
-}
-
 function MenuItem({
   onClick,
   disabled,
@@ -472,7 +260,7 @@ function SelectMenu({ onDone }: { onDone: () => void }) {
 }
 
 const VIEW_PANELS: [ViewItem, string][] = [
-  ["tools", "Tools"],
+  ["tools", "Tool rail"],
   ["color", "Colour"],
   ["options", "Brushes & tool options"],
   ["layers", "Layers"],
@@ -480,8 +268,8 @@ const VIEW_PANELS: [ViewItem, string][] = [
 ]
 
 const VIEW_CONTROLS: [ViewItem, string][] = [
-  ["context", "Tool settings bar"],
-  ["viewControls", "Zoom & rotation controls"],
+  ["context", "Quick options bar"],
+  ["viewControls", "Zoom controls"],
 ]
 
 function ViewMenu({
@@ -554,51 +342,318 @@ function ViewMenu({
   )
 }
 
-function ContextBar() {
+function Toggle({
+  on,
+  onChange,
+  children,
+  title,
+}: {
+  on: boolean
+  onChange: (on: boolean) => void
+  children: ReactNode
+  title?: string
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-pressed={on}
+      onClick={() => onChange(!on)}
+      className={cn(
+        "h-7 shrink-0 rounded-[10px] px-2 text-[11px] text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+        on && "bg-primary/25 text-foreground hover:bg-primary/35"
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** A dropdown trigger showing a value, opening a slider to change it. */
+function ValueDropdown({
+  label,
+  value,
+  text,
+  min,
+  max,
+  exp,
+  onChange,
+  children,
+}: {
+  label: string
+  value: number
+  text: string
+  min: number
+  max: number
+  exp?: number
+  onChange: (v: number) => void
+  /** Further options shown under the slider. */
+  children?: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  useDismiss(open, () => setOpen(false))
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        data-popover
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={label}
+        onClick={() => setOpen(!open)}
+        className={dropdownTriggerClass}
+      >
+        <span className="tabular-nums">{text}</span>
+        <CaretDownIcon className="size-3 opacity-70" />
+      </button>
+      {open && (
+        <div data-popover className={cn(panelClass, "absolute top-full right-0 z-50 mt-3 flex w-56 flex-col gap-2 p-3")}>
+          <div className="flex items-center gap-2">
+            <Slider label={label} className="flex-1" min={min} max={max} exp={exp} value={value} onChange={onChange} />
+            <span className="w-10 text-right text-[11px] text-foreground tabular-nums">{text}</span>
+          </div>
+          {children && <div className="flex flex-wrap gap-1">{children}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const MODES: { id: SelectMode; label: string; short: string; icon: ReactNode }[] = [
+  { id: "replace", label: "New selection", short: "New", icon: <SelectionIcon /> },
+  { id: "add", label: "Add to selection (Shift)", short: "Add", icon: <UniteIcon /> },
+  { id: "subtract", label: "Subtract from selection (Alt)", short: "Subtract", icon: <SubtractIcon /> },
+  { id: "intersect", label: "Intersect with selection (Shift+Alt)", short: "Intersect", icon: <IntersectIcon /> },
+]
+
+function ModeDropdown() {
   const s = useEngine()
-  const label = "text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
+  const [open, setOpen] = useState(false)
+  useDismiss(open, () => setOpen(false))
+  const current = MODES.find((m) => m.id === s.selMode) ?? MODES[0]
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        data-popover
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="How a new selection combines with the current one"
+        onClick={() => setOpen(!open)}
+        className={dropdownTriggerClass}
+      >
+        {current.short}
+        <CaretDownIcon className="size-3 opacity-70" />
+      </button>
+      {open && (
+        <div role="menu" data-popover className={cn(panelClass, "absolute top-full right-0 z-50 mt-3 w-60 p-1.5")}>
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={s.selMode === m.id}
+              onClick={() => {
+                engine.setSelectOptions({ selMode: m.id })
+                setOpen(false)
+              }}
+              className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left text-xs text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4"
+            >
+              <span className="text-muted-foreground">{m.icon}</span>
+              <span className="flex-1">{m.label}</span>
+              {s.selMode === m.id && <CheckIcon weight="bold" className="!size-3.5" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
-  const isVectorLayer = !!s.layers.find((l) => l.id === s.activeLayerId)?.vector
+/** Captions give way first when the top bar runs short of room. */
+const tightCaption = cn(captionClass, "hidden min-[1440px]:inline")
 
-  if (isSelectTool(s.tool)) return <SelectContext />
+function SelectContext() {
+  const s = useEngine()
+  const sampleAll = (
+    <Toggle
+      on={s.sampleAll}
+      onChange={(on) => engine.setSelectOptions({ sampleAll: on })}
+      title="Judge colours from the whole picture rather than only the active layer"
+    >
+      All layers
+    </Toggle>
+  )
+  return (
+    <>
+      <span className={tightCaption}>Mode</span>
+      <ModeDropdown />
+      <Divider />
+      {s.tool === "select-wand" && (
+        <>
+          <span className={tightCaption}>Tolerance</span>
+          <ValueDropdown
+            label="Wand tolerance"
+            min={0}
+            max={255}
+            exp={2}
+            value={s.wandTolerance}
+            text={String(s.wandTolerance)}
+            onChange={(v) => engine.setSelectOptions({ wandTolerance: v })}
+          >
+            <Toggle
+              on={s.wandContiguous}
+              onChange={(on) => engine.setSelectOptions({ wandContiguous: on })}
+              title="Select only the connected area, not every matching pixel"
+            >
+              Contiguous
+            </Toggle>
+            {sampleAll}
+          </ValueDropdown>
+        </>
+      )}
+      {s.tool === "select-brush" && (
+        <>
+          <span className={tightCaption}>Size</span>
+          <ValueDropdown
+            label="Selection brush size"
+            min={4}
+            max={600}
+            exp={2.4}
+            value={s.selBrushSize}
+            text={`${s.selBrushSize} px`}
+            onChange={(v) => engine.setSelectOptions({ selBrushSize: v })}
+          >
+            <Toggle
+              on={s.selBrushEdge}
+              onChange={(on) => engine.setSelectOptions({ selBrushEdge: on })}
+              title="Spread the selection up to nearby edges by following contrast"
+            >
+              Snap to edges
+            </Toggle>
+            {s.selBrushEdge && sampleAll}
+            {s.selBrushEdge && (
+              <div className="flex w-full items-center gap-2 pt-1">
+                <span className={captionClass}>Contrast</span>
+                <Slider
+                  label="Edge contrast tolerance"
+                  className="flex-1"
+                  min={1}
+                  max={100}
+                  value={s.selBrushContrast}
+                  onChange={(v) => engine.setSelectOptions({ selBrushContrast: v })}
+                />
+                <span className="w-8 text-right text-[11px] text-foreground tabular-nums">{s.selBrushContrast}%</span>
+              </div>
+            )}
+          </ValueDropdown>
+        </>
+      )}
+      {s.tool !== "select-wand" && s.tool !== "select-brush" && (
+        <>
+          <span className={tightCaption} title={SELECT_TOOL_INFO.find((t) => t.id === s.tool)?.hint}>
+            Feather
+          </span>
+          <ValueDropdown
+            label="Feather new selections"
+            min={0}
+            max={100}
+            exp={2}
+            value={s.selFeather}
+            text={`${s.selFeather} px`}
+            onChange={(v) => engine.setSelectOptions({ selFeather: Math.round(v) })}
+          />
+        </>
+      )}
+    </>
+  )
+}
 
-  if (isPaintTool(s.tool)) {
+/** Effect brush: reveal or hide the effect chosen in the brush library. */
+function EffectBrushContext() {
+  const s = useEngine()
+  const group = s.layers.length ? engine.effectGroup() : null
+  const mode = (hide: boolean, text: string, title: string) => (
+    <button
+      type="button"
+      title={title}
+      aria-pressed={s.fxHide === hide}
+      onClick={() => engine.setFxHide(hide)}
+      className={cn(
+        "h-6 rounded-md px-2 text-[11px] font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+        s.fxHide === hide && "bg-white/15 text-foreground"
+      )}
+    >
+      {text}
+    </button>
+  )
+  return (
+    <>
+      <Divider />
+      <div
+        role="group"
+        aria-label="Effect brush mode"
+        title={`${group ? group.name : fxChoiceLabel(s.fxChoice)}: ${group ? "painting this group's mask" : "the first stroke adds an effect group"}`}
+        className="flex shrink-0 items-center rounded-[10px] bg-black/30 p-0.5"
+      >
+        {mode(false, "Reveal", "Paint the effect in")}
+        {mode(true, "Hide", "Paint the effect back out")}
+      </div>
+    </>
+  )
+}
+
+const OPTIONS_LABEL = { brush: "brush library", object: "object options", distort: "transform options" } as const
+
+/**
+ * Quick options for the active tool. Each tool shows only what it needs;
+ * tools with a fuller options panel end with the button that toggles it.
+ */
+function ContextBar({ togglePanel, panelOpen }: { togglePanel: (id: PanelId) => void; panelOpen: (id: PanelId) => boolean }) {
+  const s = useEngine()
+  const kind = optionsKind(s)
+  const hint = "text-[11px] text-muted-foreground whitespace-nowrap"
+  const optionsButton = kind && (
+    <IconButton
+      soft
+      label={`${panelOpen("options") ? "Hide" : "Show"} the ${OPTIONS_LABEL[kind]}`}
+      className="size-7 rounded-md"
+      active={panelOpen("options")}
+      onClick={() => togglePanel("options")}
+    >
+      <MaskIcon src={brushPanelIcon} />
+    </IconButton>
+  )
+
+  let body: ReactNode = null
+  if (isSelectTool(s.tool)) {
+    body = <SelectContext />
+  } else if (isPaintTool(s.tool)) {
     const tool = s.tool
     const settings = s.toolSettings[tool]
-    return (
+    body = (
       <>
-        <span className="max-w-32 truncate text-xs font-medium text-foreground">
-          {getBrush(settings.brushId).name}
-        </span>
-        <Divider />
-        <span className={label}>Stabilise</span>
-        <Slider
-          label="Stroke stabilisation"
-          className="w-24"
-          min={0}
-          max={1}
-          value={settings.streamline}
-          onChange={(v) => engine.setToolSettings(tool, { streamline: v })}
-        />
-        <span className="w-7 text-[11px] text-foreground tabular-nums">
-          {Math.round(settings.streamline * 100)}
-        </span>
+        <div className="flex w-32 shrink-0 items-center gap-2 px-2 min-[1440px]:w-[206px]">
+          <span className={tightCaption}>Stabilise</span>
+          <Slider
+            label="Stroke stabilisation"
+            className="min-w-0 flex-1"
+            min={0}
+            max={1}
+            value={settings.streamline}
+            onChange={(v) => engine.setToolSettings(tool, { streamline: v })}
+          />
+          <span className="w-5 text-center text-[10px] leading-[14px] text-muted-foreground tabular-nums">
+            {Math.round(settings.streamline * 100)}
+          </span>
+        </div>
         {tool === "fx" && <EffectBrushContext />}
-        {tool === "smudge" && (
-          <>
-            <Divider />
-            <span className="text-[11px] text-muted-foreground">
-              Blends with a dry brush: no paint added
-            </span>
-          </>
-        )}
       </>
     )
-  }
-  if (s.tool === "fill") {
-    return (
+  } else if (s.tool === "fill") {
+    body = (
       <>
-        <span className={label}>Tolerance</span>
+        <span className={tightCaption}>Tolerance</span>
         <Slider
           label="Fill tolerance"
           className="w-28"
@@ -607,34 +662,47 @@ function ContextBar() {
           value={s.fillTolerance}
           onChange={(v) => engine.setFillTolerance(v)}
         />
-        <span className="w-7 text-[11px] text-foreground tabular-nums">{s.fillTolerance}</span>
+        <span className="w-6 text-[10px] text-muted-foreground tabular-nums">{s.fillTolerance}</span>
       </>
     )
-  }
-  if (s.tool === "shape" || s.tool === "text" || (s.tool === "move" && isVectorLayer)) {
-    return (
-      <span className="text-[11px] text-muted-foreground">
+  } else if (s.tool === "shape" || s.tool === "text" || kind === "object") {
+    body = (
+      <span className={hint}>
         {s.tool === "shape"
-          ? "Drag to draw a shape · Shift constrains · drag handles to resize or rotate"
+          ? "Drag to draw · Shift constrains"
           : s.tool === "text"
-            ? "Click to type · drag for a text box · click text to edit it · Esc to finish"
-            : "Click an object to select · drag to move · double-click text to edit"}
+            ? "Click to type · drag for a text box"
+            : "Drag to move · double-click text to edit"}
       </span>
     )
-  }
-  if (s.tool === "distort") {
-    return (
-      <span className="text-[11px] text-muted-foreground">
-        {s.distortDirty
-          ? "Enter applies the distortion · Esc resets it"
-          : "Drag on the layer to distort it · choose a mode in the panel"}
-      </span>
-    )
-  }
-  if (s.tool === "move") {
-    return (
+  } else if (s.tool === "distort") {
+    body = (
       <>
-        <span className={label}>Layer</span>
+        <span className={hint}>{s.distortDirty ? "Enter applies · Esc resets" : "Drag on the layer to transform it"}</span>
+        {s.distortDirty && (
+          <>
+            <button
+              type="button"
+              onClick={() => engine.resetDistort()}
+              className="h-7 rounded-[10px] px-2 text-[11px] text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              onClick={() => engine.applyDistort()}
+              className="h-7 rounded-[10px] bg-primary px-2.5 text-[11px] font-medium text-primary-foreground outline-none hover:bg-primary/85 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Apply
+            </button>
+          </>
+        )}
+      </>
+    )
+  } else if (s.tool === "move") {
+    body = (
+      <>
+        <span className={captionClass}>Layer</span>
         <IconButton label="Flip layer horizontally" className="size-7" onClick={() => engine.flipLayer(s.activeLayerId, "h")}>
           <FlipHorizontalIcon />
         </IconButton>
@@ -644,19 +712,56 @@ function ContextBar() {
         <button
           type="button"
           onClick={() => engine.clearSelection()}
-          className="h-7 rounded-lg px-2 text-[11px] text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-7 rounded-[10px] px-2 text-[11px] whitespace-nowrap text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
         >
           {s.hasSelection ? "Erase selection" : "Clear layer"}
         </button>
       </>
     )
+  } else if (s.tool === "eyedropper") {
+    body = <span className={hint}>Click the canvas to pick a colour</span>
   }
+
+  if (!body && !optionsButton) return null
   return (
-    <span className="text-[11px] text-muted-foreground">
-      {s.tool === "eyedropper" ? "Click the canvas to pick a colour" : "Drag to pan · scroll to zoom"}
-    </span>
+    <div className={cn(panelClass, "pointer-events-auto flex h-12 shrink items-center gap-2 px-3.5", optionsButton && "pr-2.5")}>
+      {body}
+      {optionsButton}
+    </div>
   )
 }
+
+function MenuTrigger({
+  open,
+  highlight,
+  onClick,
+  children,
+}: {
+  open: boolean
+  highlight?: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      data-popover
+      aria-haspopup="menu"
+      aria-expanded={open}
+      onClick={onClick}
+      className={cn(
+        "flex h-9 items-center gap-1 rounded-xl px-2 text-xs text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+        (open || highlight) && "text-foreground",
+        open && "bg-white/8"
+      )}
+    >
+      {children}
+      <CaretDownIcon className="size-3 opacity-70" />
+    </button>
+  )
+}
+
+type Menu = "file" | "new" | "keys" | "select" | "view" | null
 
 export function TopBar({
   panelsOpen,
@@ -671,10 +776,17 @@ export function TopBar({
 }) {
   const s = useEngine()
   const { hidden } = useLayout()
-  const aidsOpen = panelsOpen && !hidden.aids
   const fileRef = useRef<HTMLInputElement>(null)
-  const [menu, setMenu] = useState<"new" | "keys" | "select" | "view" | null>(null)
-  const degrees = Math.round((((s.rotation * 180) / Math.PI) % 360 + 540) % 360 - 180)
+  const [menu, setMenu] = useState<Menu>(null)
+  const flip = (m: Menu) => setMenu(menu === m ? null : m)
+
+  const panelOpen = (id: PanelId) => panelsOpen && !hidden[id]
+  /** Shows or hides one panel, bringing the rest back if they were tucked away. */
+  const togglePanel = (id: PanelId) => {
+    if (panelOpen(id)) return layout.toggle(id)
+    if (hidden[id]) layout.toggle(id)
+    onShowPanels()
+  }
 
   const exportPng = async () => {
     const blob = await engine.exportPNG()
@@ -692,168 +804,173 @@ export function TopBar({
     if (file) void importImages([file], (f, name) => engine.importImage(f, name))
   }
 
+  const side = "flex items-center gap-3"
+
+  // The tools stay centred while both sides fit; a crowded side pushes them over.
   return (
-    <div className="pointer-events-none absolute inset-x-3 top-3 z-30 flex items-start justify-between gap-2">
-      <div className={cn(panelClass, "pointer-events-auto relative flex h-12 items-center gap-0.5 px-2")}>
-        <button
-          type="button"
-          title="Open the gallery"
-          onClick={onOpenGallery}
-          className="mr-0.5 flex h-9 items-center gap-1.5 rounded-xl px-2 text-xs font-medium text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-[18px]"
-        >
-          <SquaresFourIcon />
-          Gallery
-        </button>
-        <Divider />
-        <IconButton label="New canvas" data-popover active={menu === "new"} onClick={() => setMenu(menu === "new" ? null : "new")}>
-          <FilePlusIcon />
-        </IconButton>
-        <IconButton label="Import image as layer" onClick={() => fileRef.current?.click()}>
-          <ImageIcon />
-        </IconButton>
-        <IconButton label="Export PNG" onClick={() => void exportPng()}>
-          <DownloadSimpleIcon />
-        </IconButton>
-        <Divider />
-        <IconButton label="Undo (Ctrl+Z)" disabled={!s.canUndo} onClick={() => engine.undo()}>
-          <ArrowCounterClockwiseIcon />
-        </IconButton>
-        <IconButton label="Redo (Ctrl+Shift+Z)" disabled={!s.canRedo} onClick={() => engine.redo()}>
-          <ArrowClockwiseIcon />
-        </IconButton>
-        <Divider />
-        <button
-          type="button"
-          title="Selection menu"
-          data-popover
-          aria-haspopup="menu"
-          aria-expanded={menu === "select"}
-          onClick={() => setMenu(menu === "select" ? null : "select")}
-          className={cn(
-            "flex h-9 items-center gap-1 rounded-xl px-2 text-xs text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-[18px]",
-            (menu === "select" || s.hasSelection) && "text-foreground",
-            menu === "select" && "bg-white/8"
-          )}
-        >
-          <SelectionAllIcon />
-          <span className="hidden sm:inline">Select</span>
-          <CaretDownIcon className="!size-3 opacity-60" />
-        </button>
-        <button
-          type="button"
-          title="View menu"
-          data-popover
-          aria-haspopup="menu"
-          aria-expanded={menu === "view"}
-          onClick={() => setMenu(menu === "view" ? null : "view")}
-          className={cn(
-            "flex h-9 items-center gap-1 rounded-xl px-2 text-xs text-muted-foreground outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-[18px]",
-            menu === "view" && "bg-white/8 text-foreground"
-          )}
-        >
-          <LayoutIcon />
-          <span className="hidden sm:inline">View</span>
-          <CaretDownIcon className="!size-3 opacity-60" />
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            void importImage(e.target.files?.[0])
-            e.target.value = ""
-          }}
-        />
-        <Popover open={menu === "new"} onClose={() => setMenu(null)} className="left-0">
-          <NewCanvasMenu onDone={() => setMenu(null)} />
-        </Popover>
-        <Popover open={menu === "select"} onClose={() => setMenu(null)} className="right-0 !p-1.5">
-          <SelectMenu onDone={() => setMenu(null)} />
-        </Popover>
-        <Popover open={menu === "view"} onClose={() => setMenu(null)} className="right-0 !p-1.5">
-          <ViewMenu
-            panelsOpen={panelsOpen}
-            onTogglePanels={onTogglePanels}
-            onShowPanels={onShowPanels}
-            onDone={() => setMenu(null)}
+    <div className="pointer-events-none absolute inset-x-3 top-3 z-30 grid grid-cols-[minmax(max-content,1fr)_auto_minmax(min-content,1fr)] items-start gap-3">
+      <div className={side}>
+        <div className={cn(panelClass, "pointer-events-auto relative flex h-12 shrink-0 items-center gap-1 px-2")}>
+          <IconButton label="Gallery" className="w-auto px-2" onClick={onOpenGallery}>
+            <SquaresFourIcon />
+          </IconButton>
+          <Divider />
+          <MenuTrigger open={menu === "file" || menu === "new"} onClick={() => flip("file")}>
+            File
+          </MenuTrigger>
+          <MenuTrigger open={menu === "select"} highlight={s.hasSelection} onClick={() => flip("select")}>
+            Select
+          </MenuTrigger>
+          <MenuTrigger open={menu === "view"} onClick={() => flip("view")}>
+            View
+          </MenuTrigger>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              void importImage(e.target.files?.[0])
+              e.target.value = ""
+            }}
           />
-        </Popover>
-      </div>
-
-      {!hidden.context && (
-        <div className={cn(panelClass, "pointer-events-auto hidden h-12 items-center gap-2 px-3.5 md:flex")}>
-          <ContextBar />
+          <Popover open={menu === "file"} onClose={() => setMenu(null)} className="left-0 !p-1.5">
+            <div role="menu" className="flex w-52 flex-col">
+              <MenuItem onClick={() => setMenu("new")}>New canvas…</MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setMenu(null)
+                  fileRef.current?.click()
+                }}
+              >
+                Import image as layer…
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setMenu(null)
+                  void exportPng()
+                }}
+              >
+                Export PNG
+              </MenuItem>
+            </div>
+          </Popover>
+          <Popover open={menu === "new"} onClose={() => setMenu(null)} className="left-0">
+            <NewCanvasMenu onDone={() => setMenu(null)} />
+          </Popover>
+          <Popover open={menu === "select"} onClose={() => setMenu(null)} className="left-0 !p-1.5">
+            <SelectMenu onDone={() => setMenu(null)} />
+          </Popover>
+          <Popover open={menu === "view"} onClose={() => setMenu(null)} className="left-0 !p-1.5">
+            <ViewMenu
+              panelsOpen={panelsOpen}
+              onTogglePanels={onTogglePanels}
+              onShowPanels={onShowPanels}
+              onDone={() => setMenu(null)}
+            />
+          </Popover>
         </div>
-      )}
 
-      <div className={cn(panelClass, "pointer-events-auto relative flex h-12 items-center gap-0.5 px-2")}>
-        {!hidden.viewControls && (
-          <>
-            <IconButton
-              label="Drawing aids — symmetry, guides, 3D reference"
-              active={aidsOpen}
-              onClick={() => {
-                if (aidsOpen) layout.toggle("aids")
-                else {
-                  if (hidden.aids) layout.toggle("aids")
-                  onShowPanels()
-                }
-              }}
-            >
-              <CompassToolIcon />
-            </IconButton>
-            <button
-              type="button"
-              title="Reset canvas rotation"
-              onClick={() => engine.resetRotation()}
-              className={cn(
-                "flex h-9 items-center gap-1 rounded-xl px-2 text-[11px] text-muted-foreground tabular-nums outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-                degrees !== 0 && "text-foreground"
-              )}
-            >
-              <CompassIcon className="size-[18px]" />
-              {degrees}°
-            </button>
-            <Divider />
-            <IconButton label="Zoom out (−)" onClick={() => engine.zoomBy(0.8)}>
-              <MinusIcon />
-            </IconButton>
-            <button
-              type="button"
-              title="Zoom to 100%"
-              onClick={() => engine.zoomBy(1 / s.zoom)}
-              className="h-9 w-12 rounded-xl text-center text-[11px] text-foreground tabular-nums outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {Math.round(s.zoom * 100)}%
-            </button>
-            <IconButton label="Zoom in (+)" onClick={() => engine.zoomBy(1.25)}>
-              <PlusIcon />
-            </IconButton>
-            <IconButton label="Fit canvas (F)" onClick={() => engine.fit()}>
-              <ArrowsInSimpleIcon />
-            </IconButton>
-            <Divider />
-          </>
-        )}
-        <IconButton label="Keyboard shortcuts" data-popover active={menu === "keys"} onClick={() => setMenu(menu === "keys" ? null : "keys")}>
-          <KeyboardIcon />
-        </IconButton>
-        <IconButton label="Toggle panels (Tab)" active={panelsOpen} onClick={onTogglePanels}>
-          <SidebarSimpleIcon />
-        </IconButton>
-        <Popover open={menu === "keys"} onClose={() => setMenu(null)} className="right-0 w-72">
-          <div className="mb-2 text-xs font-semibold tracking-wide uppercase">Shortcuts</div>
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-[11px]">
-            {SHORTCUTS.map(([k, v]) => (
-              <div key={k} className="contents">
-                <dt className="font-mono text-foreground">{k}</dt>
-                <dd className="text-muted-foreground">{v}</dd>
-              </div>
-            ))}
-          </dl>
-        </Popover>
+        <div className={cn(panelClass, "pointer-events-auto flex h-12 shrink-0 items-center gap-2 px-2")}>
+          <IconButton label="Undo (Ctrl+Z)" disabled={!s.canUndo} onClick={() => engine.undo()}>
+            <ArrowCounterClockwiseIcon />
+          </IconButton>
+          <IconButton label="Redo (Ctrl+Shift+Z)" disabled={!s.canRedo} onClick={() => engine.redo()}>
+            <ArrowClockwiseIcon />
+          </IconButton>
+        </div>
       </div>
+
+      <div className={cn(panelClass, "pointer-events-auto flex shrink-0 items-center px-1.5 py-1")}>
+        <MainTools />
+      </div>
+
+      <div className={cn(side, "justify-end")}>
+        {!hidden.context && (
+          <div className="hidden lg:contents">
+            <ContextBar togglePanel={togglePanel} panelOpen={panelOpen} />
+          </div>
+        )}
+
+        <div className={cn(panelClass, "pointer-events-auto relative flex h-12 shrink-0 items-center gap-2.5 px-2")}>
+          <IconButton
+            soft
+            label="Drawing aids — symmetry, guides, 3D reference"
+            active={panelOpen("aids")}
+            onClick={() => togglePanel("aids")}
+          >
+            <CompassToolIcon />
+          </IconButton>
+          <IconButton soft label="Keyboard shortcuts" data-popover active={menu === "keys"} onClick={() => flip("keys")}>
+            <KeyboardIcon />
+          </IconButton>
+          <IconButton
+            soft
+            label={`${panelOpen("layers") ? "Hide" : "Show"} layers`}
+            className="rounded-md"
+            active={panelOpen("layers")}
+            onClick={() => togglePanel("layers")}
+          >
+            <StackIcon />
+          </IconButton>
+          <Popover open={menu === "keys"} onClose={() => setMenu(null)} className="right-0 w-72">
+            <div className="mb-2 text-xs font-semibold tracking-wide uppercase">Shortcuts</div>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-[11px]">
+              {SHORTCUTS.map(([k, v]) => (
+                <div key={k} className="contents">
+                  <dt className="font-mono text-foreground">{k}</dt>
+                  <dd className="text-muted-foreground">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </Popover>
+        </div>
+
+        <button
+          type="button"
+          title="Colour panel (X swaps with the previous colour)"
+          aria-label={`${panelOpen("color") ? "Hide" : "Show"} the colour panel`}
+          aria-pressed={panelOpen("color")}
+          onClick={() => togglePanel("color")}
+          className={cn(panelClass, "pointer-events-auto relative size-12 shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-ring")}
+        >
+          <span
+            className="absolute right-2 bottom-2 size-5 rounded-full border border-white/25"
+            style={{ background: hsvToHex(s.prevColor) }}
+          />
+          <span
+            className="absolute top-2 left-2 size-6 rounded-full border-2 border-white/80 shadow-md"
+            style={{ background: hsvToHex(s.color) }}
+          />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Fit and zoom, in the bottom-left corner. */
+export function ZoomBar() {
+  const s = useEngine()
+  return (
+    <div className={cn(panelClass, "absolute bottom-3 left-3 z-30 flex h-12 items-center gap-0.5 px-1")}>
+      <IconButton label="Fit canvas (F)" onClick={() => engine.fit()}>
+        <ArrowsInIcon />
+      </IconButton>
+      <Divider />
+      <IconButton label="Zoom out (−)" onClick={() => engine.zoomBy(0.8)}>
+        <MinusIcon />
+      </IconButton>
+      <button
+        type="button"
+        title="Zoom to 100%"
+        onClick={() => engine.zoomBy(1 / s.zoom)}
+        className="h-9 w-11 rounded-xl text-center text-[11px] text-foreground tabular-nums outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {Math.round(s.zoom * 100)}%
+      </button>
+      <IconButton label="Zoom in (+)" onClick={() => engine.zoomBy(1.25)}>
+        <PlusIcon />
+      </IconButton>
     </div>
   )
 }

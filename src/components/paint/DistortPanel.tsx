@@ -49,7 +49,7 @@ export function DistortPanel() {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 px-3 pt-2.5 pb-1.5">
         <h2 className="mr-auto text-xs font-semibold tracking-wide text-foreground uppercase">
-          Distort
+          Transform
         </h2>
         <span className="max-w-32 truncate rounded-full bg-white/8 px-2 py-0.5 text-[10px] text-muted-foreground">
           {layer?.name}

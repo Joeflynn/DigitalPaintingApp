@@ -36,12 +36,15 @@ export function useDismiss(open: boolean, onClose: () => void) {
 export function IconButton({
   label,
   active,
+  soft = false,
   className,
   children,
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
   label: string
   active?: boolean
+  /** Active shows as a tint rather than solid primary: for panel toggles and sub-tools. */
+  soft?: boolean
 }) {
   return (
     <button
@@ -52,7 +55,9 @@ export function IconButton({
       className={cn(
         "grid size-9 shrink-0 place-items-center rounded-xl text-muted-foreground transition-colors outline-none hover:bg-white/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30 [&_svg]:size-[18px]",
         active &&
-          "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground",
+          (soft
+            ? "bg-primary/25 text-foreground hover:bg-primary/35"
+            : "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"),
         className
       )}
       {...props}
@@ -61,6 +66,38 @@ export function IconButton({
     </button>
   )
 }
+
+/**
+ * A single-colour SVG asset drawn in the current text colour, so it follows
+ * hover and active states like the Phosphor icons do.
+ */
+export function MaskIcon({ src, className }: { src: string; className?: string }) {
+  // Quoted: Vite inlines small SVGs as data URIs, which break a bare url().
+  const url = `url("${src.replace(/"/g, "%22")}")`
+  return (
+    <span
+      aria-hidden
+      className={cn("inline-block size-[18px] shrink-0 bg-current", className)}
+      style={{
+        maskImage: url,
+        WebkitMaskImage: url,
+        maskSize: "contain",
+        WebkitMaskSize: "contain",
+        maskRepeat: "no-repeat",
+        WebkitMaskRepeat: "no-repeat",
+        maskPosition: "center",
+        WebkitMaskPosition: "center",
+      }}
+    />
+  )
+}
+
+/** Small uppercase caption used beside quick-option controls. */
+export const captionClass = "text-[10px] leading-[14px] font-medium tracking-[0.25px] text-muted-foreground uppercase"
+
+/** Compact select-style trigger (design: Dropdown Trigger). */
+export const dropdownTriggerClass =
+  "flex h-7 shrink-0 items-center gap-1 rounded-[10px] border border-white/10 bg-black/30 px-2 text-[11px] leading-4 text-foreground outline-none hover:border-white/30 focus-visible:ring-2 focus-visible:ring-ring"
 
 interface SliderProps {
   value: number
