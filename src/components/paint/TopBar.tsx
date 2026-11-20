@@ -33,13 +33,80 @@ import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { getBrush } from "@/paint/brushes"
 import { importImages } from "@/paint/palettes"
+import { AddEffectMenu } from "@/components/paint/LayersPanel"
 import {
   engine,
+  fxChoiceLabel,
   isPaintTool,
   isSelectTool,
   type SelectMode,
   type SelectModify,
 } from "@/paint/engine"
+
+/** Effect brush: which effect it paints, and whether it reveals or hides it. */
+function EffectBrushContext() {
+  const s = useEngine()
+  const [open, setOpen] = useState(false)
+  useDismiss(open, () => setOpen(false))
+  // Read from the state so this follows the active layer.
+  const group = s.layers.length ? engine.effectGroup() : null
+  const label = "text-[10px] font-medium tracking-wide text-muted-foreground uppercase"
+  const mode = (hide: boolean, text: string, title: string) => (
+    <button
+      type="button"
+      title={title}
+      aria-pressed={s.fxHide === hide}
+      onClick={() => engine.setFxHide(hide)}
+      className={cn(
+        "h-6 rounded-md px-2 text-[11px] font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+        s.fxHide === hide && "bg-white/15 text-foreground"
+      )}
+    >
+      {text}
+    </button>
+  )
+  return (
+    <>
+      <div className="mx-1 h-5 w-px shrink-0 bg-white/10" />
+      <span className={label}>Effect</span>
+      <div className="relative">
+        <button
+          type="button"
+          data-popover
+          aria-haspopup="menu"
+          aria-expanded={open}
+          title="Choose an effect: it gets its own group, ready to paint in"
+          onClick={() => setOpen(!open)}
+          className="flex h-7 max-w-44 items-center gap-1 rounded-lg border border-white/10 bg-black/30 px-2 text-[11px] text-foreground outline-none hover:border-white/30 focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <span className="truncate">{group ? group.name : fxChoiceLabel(s.fxChoice)}</span>
+          <CaretDownIcon className="size-3 shrink-0 opacity-70" />
+        </button>
+        {open && (
+          <div data-popover className={cn(panelClass, "absolute top-full left-0 z-50 mt-2 w-64 p-2")}>
+            <AddEffectMenu
+              onPick={(id) => {
+                engine.setFxChoice({ kind: "fx", id })
+                setOpen(false)
+              }}
+              onLook={(id) => {
+                engine.setFxChoice({ kind: "look", id })
+                setOpen(false)
+              }}
+            />
+          </div>
+        )}
+      </div>
+      <div className="flex items-center rounded-lg bg-black/30 p-0.5" role="group" aria-label="Effect brush mode">
+        {mode(false, "Reveal", "Paint the effect in")}
+        {mode(true, "Hide", "Paint the effect back out")}
+      </div>
+      <span className="hidden text-[11px] text-muted-foreground xl:inline">
+        {group ? "Painting this group's mask" : "The first stroke adds an effect group"}
+      </span>
+    </>
+  )
+}
 
 const PRESETS = [
   { label: "Landscape", w: 2000, h: 1400 },
@@ -51,6 +118,7 @@ const PRESETS = [
 
 const SHORTCUTS: [string, string][] = [
   ["B / E / S", "Brush, eraser, smudge"],
+  ["K", "Effect brush"],
   ["G / I / V / H", "Fill, eyedropper, move, pan"],
   ["A / L / P", "Rectangle, lasso, polygon select"],
   ["Q / W", "Selection brush, magic wand"],
@@ -515,6 +583,7 @@ function ContextBar() {
         <span className="w-7 text-[11px] text-foreground tabular-nums">
           {Math.round(settings.streamline * 100)}
         </span>
+        {tool === "fx" && <EffectBrushContext />}
         {tool === "smudge" && (
           <>
             <Divider />

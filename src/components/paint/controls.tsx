@@ -74,6 +74,8 @@ interface SliderProps {
   className?: string
   /** Custom track background (e.g. a hue gradient); hides the fill. */
   trackStyle?: React.CSSProperties
+  /** A filled bar with a pill thumb, as on the layer tiles. Horizontal only. */
+  bar?: boolean
 }
 
 export function Slider({
@@ -86,13 +88,14 @@ export function Slider({
   exp = 1,
   className,
   trackStyle,
+  bar = false,
 }: SliderProps) {
   const t = Math.pow(Math.min(1, Math.max(0, (value - min) / (max - min))), 1 / exp)
   const fromT = (u: number) => min + (max - min) * Math.pow(u, exp)
 
   const fromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
     const r = e.currentTarget.getBoundingClientRect()
-    const pad = vertical ? 0 : 7
+    const pad = vertical ? 0 : bar ? 4 : 7
     const u = vertical
       ? 1 - (e.clientY - r.top) / r.height
       : (e.clientX - r.left - pad) / (r.width - pad * 2)
@@ -145,6 +148,25 @@ export function Slider({
         <div
           className="absolute inset-x-1.5 h-1 -translate-y-1/2 rounded-full bg-foreground/90"
           style={{ top: `calc(${(1 - t) * 100}% * 0.94 + 3%)` }}
+        />
+      </div>
+    )
+  }
+
+  if (bar) {
+    const at = `calc(4px + (100% - 8px) * ${t})`
+    return (
+      <div
+        {...common}
+        className={cn(
+          "relative h-6 cursor-ew-resize touch-none overflow-hidden rounded-md bg-white/6 outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          className
+        )}
+      >
+        <div className="absolute inset-y-0 left-0 bg-white/14" style={{ width: at }} />
+        <div
+          className="absolute top-0.5 h-5 w-1 -translate-x-1/2 rounded-full bg-foreground"
+          style={{ left: at }}
         />
       </div>
     )

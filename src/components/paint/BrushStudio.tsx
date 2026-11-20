@@ -25,7 +25,9 @@ import {
   deleteCustomBrush,
   getBrush,
   MASK_BLENDS,
+  maskBrush,
   PAINT_BLENDS,
+  PIGMENT_TARGETS,
   STROKE_EFFECTS,
   type StrokeEffect,
   normalizeBrush,
@@ -245,6 +247,11 @@ const LINK_RECIPES: { name: string; links: BrushLink[]; patch?: Partial<BrushPre
 interface Editing {
   brush: BrushPreset
   set: (patch: Partial<BrushPreset>) => void
+  /**
+   * The brush is for the effect brush, which only paints a mask: settings
+   * that act on pigment would do nothing, so they are left out.
+   */
+  mask: boolean
 }
 
 const EditingContext = createContext<Editing | null>(null)
@@ -592,10 +599,11 @@ function StrokeSection() {
 }
 
 function MediaSection() {
-  const { brush, set } = useEditing()
+  const { brush, set, mask } = useEditing()
+  const effects = mask ? STROKE_EFFECTS.filter((e) => e !== "chroma") : STROKE_EFFECTS
   return (
     <>
-      <Group title="Start from a medium" hint="Sets the paint behaviour below and leaves the stamp and dynamics alone.">
+      {!mask && <Group title="Start from a medium" hint="Sets the paint behaviour below and leaves the stamp and dynamics alone.">
         <div className="flex flex-wrap gap-1">
           {MEDIA.map((m) => (
             <button key={m.name} type="button" title={m.hint} className={buttonClass} onClick={() => set(m.patch)}>
@@ -603,8 +611,8 @@ function MediaSection() {
             </button>
           ))}
         </div>
-      </Group>
-      <Group title="On the surface">
+      </Group>}
+      {!mask && <Group title="On the surface">
         <div className="mb-1">
           <Chips
             label="How paint sits on what is beneath"
@@ -623,13 +631,13 @@ function MediaSection() {
                 ? "Turns what is under it into its negative, whatever colour is picked."
                 : "Covers what is under it."}
         </p>
-      </Group>
+      </Group>}
       <Group title="Stroke effect" hint="Redraws the whole stroke after the stamps have been laid down.">
         <div className="mb-1">
           <Chips
             label="Stroke effect"
             value={brush.effect}
-            options={STROKE_EFFECTS}
+            options={effects}
             labels={EFFECT_LABEL}
             onChange={(effect) => set({ effect })}
           />
@@ -639,13 +647,22 @@ function MediaSection() {
           <Num k="effectAmount" label="Effect size" min={0.02} max={1} hint="Block, line or offset size relative to the brush" />
         )}
       </Group>
-      <Group title="Oil & impasto" hint="Thick paint that mixes on the canvas.">
-        <Num k="pickup" label="Colour pickup" min={0} max={1} hint="How much the tip takes up from the canvas and drags along" />
-        <Num k="relief" label="Thickness" min={0} max={1} hint="Raised ridges, lit from the upper left" />
-        <Num k="gloss" label="Gloss" min={0} max={1} hint="Shine of thick paint; needs some thickness" />
-        <Num k="depletion" label="Runs dry" min={0} max={1} hint="How quickly the brush runs out along a stroke" />
-      </Group>
-      <Group title="Watercolour & wet media" hint="Paint that keeps moving after it is laid down.">
+      {mask ? (
+        <Group title="Load" hint="How long a stroke keeps revealing the effect.">
+          <Num k="depletion" label="Runs dry" min={0} max={1} hint="How quickly the brush runs out along a stroke" />
+        </Group>
+      ) : (
+        <Group title="Oil & impasto" hint="Thick paint that mixes on the canvas.">
+          <Num k="pickup" label="Colour pickup" min={0} max={1} hint="How much the tip takes up from the canvas and drags along" />
+          <Num k="relief" label="Thickness" min={0} max={1} hint="Raised ridges, lit from the upper left" />
+          <Num k="gloss" label="Gloss" min={0} max={1} hint="Shine of thick paint; needs some thickness" />
+          <Num k="depletion" label="Runs dry" min={0} max={1} hint="How quickly the brush runs out along a stroke" />
+        </Group>
+      )}
+      <Group
+        title="Watercolour & wet media"
+        hint={mask ? "A wet edge: the revealed area keeps spreading after the stroke." : "Paint that keeps moving after it is laid down."}
+      >
         <Num k="wetness" label="Wetness" min={0} max={1} hint="How much water the brush carries" />
         <Num k="bleed" label="Bleed" min={0} max={1} hint="How far wet paint creeps outwards" />
         <Num k="edgeDarken" label="Edge darkening" min={0} max={1} hint="Pigment gathering at the rim as a wash dries" />
@@ -678,8 +695,10 @@ function LinkCurve({ link }: { link: BrushLink }) {
 }
 
 function DynamicsSection() {
-  const { brush, set } = useEditing()
+  const { brush, set, mask } = useEditing()
   const links = brush.links
+  const usable = (t: LinkTarget) => !mask || !PIGMENT_TARGETS.includes(t)
+  const recipes = LINK_RECIPES.filter((r) => r.links.every((l) => usable(l.target)))
   const update = (i: number, patch: Partial<BrushLink>) =>
     set({ links: links.map((l, j) => (j === i ? { ...l, ...patch } : l)) })
   return (
@@ -704,7 +723,7 @@ function DynamicsSection() {
               </select>
               <span className="text-muted-foreground" aria-hidden>→</span>
               <select aria-label="Property" value={l.target} onChange={(e) => update(i, { target: e.target.value as LinkTarget })} className={cn(fieldClass, "flex-1")}>
-                {(Object.keys(TARGET_LABEL) as LinkTarget[]).map((k) => (
+                {(Object.keys(TARGET_LABEL) as LinkTarget[]).filter((k) => usable(k) || k === l.target).map((k) => (
                   <option key={k} value={k} className="bg-neutral-900">{TARGET_LABEL[k]}</option>
                 ))}
               </select>
@@ -735,7 +754,7 @@ function DynamicsSection() {
             aria-label="Add a recipe"
             value=""
             onChange={(e) => {
-              const recipe = LINK_RECIPES.find((r) => r.name === e.target.value)
+              const recipe = recipes.find((r) => r.name === e.target.value)
               if (recipe) {
                 set({
                   links: [...links, ...recipe.links],
@@ -1083,7 +1102,11 @@ export function BrushStudio({ tool, onClose }: { tool: PaintTool; onClose: () =>
     }
   }
 
-  const Section = SECTIONS.find(([name]) => name === section)?.[1] ?? StampSection
+  const mask = tool === "fx"
+  // What the tool will really paint with: the effect brush ignores pigment.
+  const shown = mask ? maskBrush(brush) : brush
+  const Section =
+    SECTIONS.find(([name]) => name === section && !(mask && name === "Colour"))?.[1] ?? StampSection
 
   return (
     <div
@@ -1102,7 +1125,7 @@ export function BrushStudio({ tool, onClose }: { tool: PaintTool; onClose: () =>
         className={cn(panelClass, "flex h-[min(760px,100%)] w-[min(1120px,100%)] flex-col overflow-hidden outline-none select-none")}
       >
         <header className="flex flex-wrap items-center gap-2 border-b border-white/8 px-4 py-2.5">
-          <h2 className="mr-1 text-sm font-semibold">Brush studio</h2>
+          <h2 className="mr-1 text-sm font-semibold">{mask ? "Effect brush studio" : "Brush studio"}</h2>
           <input
             aria-label="Brush name"
             value={brush.name}
@@ -1174,7 +1197,7 @@ export function BrushStudio({ tool, onClose }: { tool: PaintTool; onClose: () =>
 
         <div className="flex min-h-0 flex-1">
           <nav aria-label="Brush settings" className="flex w-36 shrink-0 flex-col gap-0.5 border-r border-white/8 p-2">
-            {SECTIONS.map(([name]) => (
+            {SECTIONS.filter(([name]) => !(mask && name === "Colour")).map(([name]) => (
               <button
                 key={name}
                 type="button"
@@ -1186,12 +1209,12 @@ export function BrushStudio({ tool, onClose }: { tool: PaintTool; onClose: () =>
                 )}
               >
                 {name}
-                {sectionActive(name, brush) && <span className="size-1.5 rounded-full bg-primary" aria-label="in use" />}
+                {sectionActive(name, shown) && <span className="size-1.5 rounded-full bg-primary" aria-label="in use" />}
               </button>
             ))}
           </nav>
 
-          <EditingContext.Provider value={{ brush, set }}>
+          <EditingContext.Provider value={{ brush, set, mask }}>
             <div className="min-w-0 flex-1 [scrollbar-width:thin] overflow-y-auto px-5 py-4">
               <Section />
             </div>
@@ -1199,9 +1222,9 @@ export function BrushStudio({ tool, onClose }: { tool: PaintTool; onClose: () =>
 
           <aside className="flex w-[44%] max-w-[480px] shrink-0 flex-col gap-2.5 [scrollbar-width:thin] overflow-y-auto border-l border-white/8 p-3">
             <div className="overflow-hidden rounded-xl bg-black/30">
-              <BrushPreview brush={brush} className="h-20 w-full object-contain" />
+              <BrushPreview brush={shown} className="h-20 w-full object-contain" />
             </div>
-            <ScratchPad brush={brush} size={Math.min(settings.size, 140)} opacity={settings.opacity} />
+            <ScratchPad brush={shown} size={Math.min(settings.size, 140)} opacity={settings.opacity} />
             <div className="flex flex-col gap-0.5">
               <Row label="Size">
                 <Slider label="Size" className="min-w-0 flex-1" min={1} max={400} exp={2.2} value={settings.size} onChange={(v) => engine.setToolSettings(tool, { size: Math.round(v) })} />

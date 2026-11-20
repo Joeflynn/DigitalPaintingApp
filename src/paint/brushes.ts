@@ -1152,5 +1152,33 @@ export function dryBrush(brush: BrushPreset): BrushPreset {
   }
 }
 
+/** Link targets that only change pigment, not where the brush marks. */
+export const PIGMENT_TARGETS: LinkTarget[] = ["load", "hue", "sat", "lum", "mix2"]
+
+/**
+ * The brush as the effect brush uses it. It paints a mask, which is only
+ * ever coverage, so everything that acts on pigment is dropped: colour
+ * shifts, pickup, thickness and shine, the paint blend and the colour-only
+ * stroke effect. Shape, texture, dynamics and wet edges all still apply.
+ */
+export function maskBrush(brush: BrushPreset): BrushPreset {
+  return {
+    ...brush,
+    paintBlend: "normal",
+    effect: brush.effect === "chroma" ? "none" : brush.effect,
+    pickup: 0,
+    relief: 0,
+    hueJitter: 0,
+    satJitter: 0,
+    lumJitter: 0,
+    strokeHueJitter: 0,
+    strokeSatJitter: 0,
+    strokeLumJitter: 0,
+    hueCycle: 0,
+    secondaryMix: 0,
+    links: (brush.links ?? []).filter((l) => !PIGMENT_TARGETS.includes(l.target)),
+  }
+}
+
 export const MIN_BRUSH_SIZE = 1
 export const MAX_BRUSH_SIZE = 400

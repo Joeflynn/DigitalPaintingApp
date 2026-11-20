@@ -99,7 +99,7 @@ export function App() {
             </PanelFrame>
           )}
           {!hidden.layers && (
-            <PanelFrame id="layers" label="Layers" minW={260}>
+            <PanelFrame id="layers" label="Layers" minW={124}>
               <LayersPanel />
             </PanelFrame>
           )}

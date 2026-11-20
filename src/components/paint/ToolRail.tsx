@@ -5,6 +5,7 @@ import {
   GridNineIcon,
   HandIcon,
   HandPointingIcon,
+  SparkleIcon,
   PaintBrushIcon,
   PaintBucketIcon,
   TextTIcon,
@@ -25,6 +26,7 @@ const TOOLS: { id: ToolId; label: string; icon: ReactNode }[] = [
   { id: "brush", label: "Brush (B)", icon: <PaintBrushIcon /> },
   { id: "smudge", label: "Smudge (S)", icon: <HandPointingIcon /> },
   { id: "eraser", label: "Eraser (E)", icon: <EraserIcon /> },
+  { id: "fx", label: "Effect brush — paint an effect onto the canvas (K)", icon: <SparkleIcon /> },
   { id: "fill", label: "Fill (G)", icon: <PaintBucketIcon /> },
   { id: "eyedropper", label: "Eyedropper (I, or hold Alt)", icon: <EyedropperIcon /> },
 ]
@@ -191,11 +193,11 @@ export function ToolRail({ className }: { className?: string }) {
         </span>
         <div className="my-0.5 h-px w-6 bg-white/10" />
         <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-          {tool === "smudge" ? "Str" : "Opac"}
+          {tool === "smudge" || tool === "fx" ? "Str" : "Opac"}
         </span>
         <Slider
           vertical
-          label={tool === "smudge" ? "Smudge strength" : "Brush opacity"}
+          label={tool === "smudge" ? "Smudge strength" : tool === "fx" ? "Effect strength" : "Brush opacity"}
           className="h-28"
           min={0.01}
           max={1}

@@ -99,6 +99,9 @@ export function useShortcuts(togglePanels: () => void) {
         case "s":
           engine.setTool("smudge")
           break
+        case "k":
+          engine.setTool("fx")
+          break
         case "g":
           engine.setTool("fill")
           break

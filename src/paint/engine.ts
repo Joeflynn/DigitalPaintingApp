@@ -2,6 +2,7 @@ import { GPUBrush, GPUSizeError } from "./gpu-brush"
 import {
   type BrushPreset,
   dryBrush,
+  maskBrush,
   getBrush,
   MAX_BRUSH_SIZE,
   MIN_BRUSH_SIZE,
@@ -16,7 +17,7 @@ import {
   type DistortSession,
   type LiquifyTool,
 } from "./distort"
-import { defaultFx, getEffect, type LayerFx } from "./effects"
+import { defaultFx, getEffect, LOOKS, type LayerFx } from "./effects"
 import { GPUAnts } from "./gpu-ants"
 import { GPUEffects } from "./gpu-effects"
 import {
@@ -142,6 +143,207 @@ export interface LayerMeta {
    * layer's pixels are just a rasterised copy of these.
    */
   vector?: VectorObject[]
+  /**
+   * Set on groups: a folder that holds no pixels of its own. Its layers sit
+   * directly beneath it in the stack and name it as their `parent`. A group
+   * passes through: adjustment layers inside it act on everything below the
+   * group, and the group's mask and opacity decide where and how strongly
+   * its contents show.
+   */
+  group?: boolean
+  /** Id of the group this layer is in. */
+  parent?: string
+  /** The group's contents are folded away in the layers panel. */
+  collapsed?: boolean
+  /** Set on a group made by the effect brush: the effect it was made from. */
+  brushFx?: string
+}
+
+/** True for layers with no pixels of their own: adjustments and groups. */
+export function noPixels(l: LayerMeta): boolean {
+  return !!l.fx || !!l.group
+}
+
+/** The first and last index of a layer together with everything inside it. */
+export function layerBlock(layers: LayerMeta[], id: string): [number, number] | null {
+  const end = layers.findIndex((l) => l.id === id)
+  if (end < 0) return null
+  let start = end
+  if (layers[end].group) {
+    const inside = new Set([id])
+    while (start > 0) {
+      const below = layers[start - 1]
+      if (!below.parent || !inside.has(below.parent)) break
+      start--
+      if (below.group) inside.add(below.id)
+    }
+  }
+  return [start, end]
+}
+
+/** How many groups a layer is nested in. */
+export function layerDepth(layers: LayerMeta[], layer: LayerMeta): number {
+  let depth = 0
+  let parent = layer.parent
+  while (parent && depth < 32) {
+    depth++
+    const id: string = parent
+    parent = layers.find((l) => l.id === id)?.parent
+  }
+  return depth
+}
+
+/**
+ * The stack with a layer (and, for a group, its contents) moved one step up
+ * or down, or null if it is already at that end. Stepping onto an open group
+ * moves into it, and stepping past the edge of a group moves out of it.
+ */
+export function moveBlock(layers: LayerMeta[], id: string, dir: 1 | -1): LayerMeta[] | null {
+  const block = layerBlock(layers, id)
+  if (!block) return null
+  const [s, e] = block
+  const me = layers[e]
+  const reparent = (parent: string | undefined) =>
+    layers.map((l, i) => (i === e ? { ...l, parent } : l))
+  const shift = (list: LayerMeta[], to: number) => {
+    const next = list.slice()
+    const moved = next.splice(s, e - s + 1)
+    next.splice(to, 0, ...moved)
+    return next
+  }
+  if (dir === 1) {
+    const above = layers[e + 1]
+    if (!above) return null
+    // Out of the top of its group, to sit just above it.
+    if (above.id === me.parent) return shift(reparent(above.parent), s + 1)
+    if (above.parent === me.parent && !above.group) return shift(layers, s + 1)
+    // A group sits above: its header if it is empty, else its lowest layer.
+    let g: LayerMeta | undefined = above
+    while (g && g.parent !== me.parent) {
+      const pid: string | undefined = g.parent
+      g = layers.find((l) => l.id === pid)
+    }
+    if (!g) return null
+    if (!g.collapsed) return reparent(g.id)
+    return shift(layers, layers.indexOf(g) - (e - s))
+  }
+  const below = layers[s - 1]
+  if (!below || below.parent !== me.parent) {
+    // Out of the bottom of its group, to sit just beneath it.
+    if (!me.parent) return null
+    return reparent(layers.find((l) => l.id === me.parent)?.parent)
+  }
+  if (!below.group) return shift(layers, s - 1)
+  // Into the top of the group beneath: its layers sit under its header.
+  if (!below.collapsed) return shift(reparent(below.id), s - 1)
+  return shift(layers, layerBlock(layers, below.id)![0])
+}
+
+/** Where a dragged layer lands relative to the row it is dropped on. */
+export type DropPlace = "above" | "below" | "inside"
+
+/** The given ids that exist, minus any inside another given group (they move with it). */
+export function outermostLayers(layers: LayerMeta[], ids: Iterable<string>): string[] {
+  const chosen = new Set(ids)
+  const byId = new Map(layers.map((l) => [l.id, l]))
+  return [...chosen].filter((id) => {
+    if (!byId.has(id)) return false
+    let p = byId.get(id)?.parent
+    for (let n = 0; p && n < 32; n++) {
+      if (chosen.has(p)) return false
+      p = byId.get(p)?.parent
+    }
+    return true
+  })
+}
+
+function withParent(l: LayerMeta, parent: string | undefined): LayerMeta {
+  const copy = { ...l }
+  if (parent) copy.parent = parent
+  else delete copy.parent
+  return copy
+}
+
+/** Takes the blocks of the given layers out of the stack, keeping their order. */
+function liftBlocks(layers: LayerMeta[], ids: Iterable<string>) {
+  const roots = new Set(outermostLayers(layers, ids))
+  const taken = new Set<number>()
+  for (const id of roots) {
+    const [s, e] = layerBlock(layers, id)!
+    for (let i = s; i <= e; i++) taken.add(i)
+  }
+  return {
+    roots,
+    taken,
+    rest: layers.filter((_, i) => !taken.has(i)),
+    moved: layers.filter((_, i) => taken.has(i)),
+  }
+}
+
+function sameStack(a: LayerMeta[], b: LayerMeta[]) {
+  return a.length === b.length && a.every((l, i) => l.id === b[i].id && l.parent === b[i].parent)
+}
+
+/**
+ * The stack with the given layers (each with its contents) moved next to,
+ * or into, a target layer; a null target means the bottom of the stack.
+ * Null if nothing would change or the target is among the moved layers.
+ */
+export function moveBlocks(
+  layers: LayerMeta[],
+  ids: Iterable<string>,
+  targetId: string | null,
+  place: DropPlace
+): LayerMeta[] | null {
+  const { rest, moved, roots } = liftBlocks(layers, ids)
+  if (!moved.length) return null
+  let at = 0
+  let parent: string | undefined
+  if (targetId !== null) {
+    const target = rest.find((l) => l.id === targetId)
+    if (!target || (place === "inside" && !target.group)) return null
+    const ti = rest.indexOf(target)
+    parent = place === "inside" ? target.id : target.parent
+    at = place === "above" ? ti + 1 : place === "inside" ? ti : layerBlock(rest, target.id)![0]
+  }
+  const next = rest.slice()
+  next.splice(at, 0, ...moved.map((l) => (roots.has(l.id) ? withParent(l, parent) : l)))
+  return sameStack(next, layers) ? null : next
+}
+
+/**
+ * The stack with the given layers gathered into `group`, which takes the
+ * place (and the parent) of the topmost of them.
+ */
+export function groupBlocks(
+  layers: LayerMeta[],
+  ids: Iterable<string>,
+  group: LayerMeta
+): LayerMeta[] | null {
+  const { rest, moved, roots, taken } = liftBlocks(layers, ids)
+  if (!moved.length) return null
+  const top = moved[moved.length - 1]
+  const topIdx = layers.indexOf(top)
+  let at = 0
+  for (let i = 0; i < topIdx; i++) if (!taken.has(i)) at++
+  const next = rest.slice()
+  next.splice(
+    at,
+    0,
+    ...moved.map((l) => (roots.has(l.id) ? withParent(l, group.id) : l)),
+    withParent(group, top.parent)
+  )
+  return next
+}
+
+/** What the effect brush paints with: one effect, or a look made of several. */
+export interface FxChoice {
+  kind: "fx" | "look"
+  id: string
+}
+
+export function fxChoiceLabel(c: FxChoice): string {
+  return (c.kind === "look" ? LOOKS.find((l) => l.id === c.id)?.label : getEffect(c.id)?.label) ?? "Effect"
 }
 
 /** Which of a layer's two canvases an edit goes to. */
@@ -163,7 +365,7 @@ export interface SelectOptions {
   selBrushContrast: number
 }
 
-export type PaintTool = "brush" | "eraser" | "smudge"
+export type PaintTool = "brush" | "eraser" | "smudge" | "fx"
 export type ToolId =
   | PaintTool
   | SelectTool
@@ -180,7 +382,7 @@ export function isSelectTool(t: ToolId): t is SelectTool {
 }
 
 export function isPaintTool(t: ToolId): t is PaintTool {
-  return t === "brush" || t === "eraser" || t === "smudge"
+  return t === "brush" || t === "eraser" || t === "smudge" || t === "fx"
 }
 
 /** Tools that create or edit vector objects. */
@@ -221,6 +423,10 @@ export interface EngineState extends SelectOptions {
   activeLayerId: string
   tool: ToolId
   toolSettings: Record<PaintTool, ToolSettings>
+  /** The effect a new effect-brush group is made from. */
+  fxChoice: FxChoice
+  /** The effect brush hides the effect instead of revealing it. */
+  fxHide: boolean
   color: HSV
   prevColor: HSV
   recentColors: string[]
@@ -401,7 +607,10 @@ export class PaintEngine {
       brush: defaultSettings("studio-pen"),
       eraser: defaultSettings("hard-round"),
       smudge: defaultSettings("soft-airbrush", 70, 0.7),
+      fx: defaultSettings("soft-airbrush", 160, 1),
     },
+    fxChoice: { kind: "fx", id: "pixelate" },
+    fxHide: false,
     color: { h: 18, s: 0.78, v: 0.2 },
     prevColor: { h: 12, s: 0.72, v: 0.86 },
     recentColors: [],
@@ -687,7 +896,7 @@ export class PaintEngine {
       }
     }
     for (const meta of doc.layers) {
-      const c = meta.fx ? makeCanvas(1, 1) : makeCanvas(doc.width, doc.height)
+      const c = noPixels(meta) ? makeCanvas(1, 1) : makeCanvas(doc.width, doc.height)
       const blob = meta.vector ? undefined : doc.blobs[meta.id]
       if (blob) {
         const bmp = await createImageBitmap(blob)
@@ -713,6 +922,9 @@ export class PaintEngine {
       revCounter = Math.max(revCounter, meta.rev, meta.maskRev ?? 0)
     }
     this.layerCounter = doc.layers.length
+    // A layer whose group has gone missing would never be drawn.
+    const groups = new Set(doc.layers.filter((l) => l.group).map((l) => l.id))
+    for (const l of doc.layers) if (l.parent && !groups.has(l.parent)) delete l.parent
     this.undoStack = []
     this.redoStack = []
     this.needsFit = true
@@ -818,6 +1030,39 @@ export class PaintEngine {
 
   private activeLayer(): LayerMeta | undefined {
     return this.state.layers.find((l) => l.id === this.state.activeLayerId)
+  }
+
+  private layerById(id: string | undefined): LayerMeta | undefined {
+    return id ? this.state.layers.find((l) => l.id === id) : undefined
+  }
+
+  /** True if the layer and every group it is in are visible. */
+  private shown(m: LayerMeta): boolean {
+    let l: LayerMeta | undefined = m
+    for (let n = 0; l && n < 32; n++) {
+      if (!l.visible) return false
+      l = this.layerById(l.parent)
+    }
+    return true
+  }
+
+  /**
+   * The stack with new layers added above a layer (the active one by
+   * default), in the same group; if that layer is a group they go inside it,
+   * at the top.
+   */
+  private place(made: LayerMeta[], anchorId = this.state.activeLayerId): LayerMeta[] {
+    const { layers } = this.state
+    const idx = layers.findIndex((l) => l.id === anchorId)
+    const anchor = layers[idx]
+    const parent = anchor?.group ? anchor.id : anchor?.parent
+    for (const l of made) {
+      if (parent) l.parent = parent
+      else delete l.parent
+    }
+    const next = layers.slice()
+    next.splice(anchor?.group ? idx : idx + 1, 0, ...made)
+    return next
   }
 
   getMaskCanvas(id: string): HTMLCanvasElement | undefined {
@@ -962,19 +1207,16 @@ export class PaintEngine {
 
   addLayer() {
     this.structural(() => {
-      const { layers, activeLayerId, docW, docH } = this.state
+      const { docW, docH } = this.state
       const layer = this.makeLayer()
       this.canvases.set(layer.id, makeCanvas(docW, docH))
-      const idx = layers.findIndex((l) => l.id === activeLayerId)
-      const next = layers.slice()
-      next.splice(idx + 1, 0, layer)
-      this.setState({ layers: next, activeLayerId: layer.id })
+      this.setState({ layers: this.place([layer]), activeLayerId: layer.id, editMask: false })
     })
   }
 
   addImageLayer(img: CanvasImageSource, iw: number, ih: number, name: string) {
     this.structural(() => {
-      const { layers, activeLayerId, docW, docH } = this.state
+      const { docW, docH } = this.state
       const layer = this.makeLayer(name)
       const c = makeCanvas(docW, docH)
       const s = Math.min(1, docW / iw, docH / ih)
@@ -982,10 +1224,7 @@ export class PaintEngine {
       const h = ih * s
       ctxOf(c).drawImage(img, (docW - w) / 2, (docH - h) / 2, w, h)
       this.canvases.set(layer.id, c)
-      const idx = layers.findIndex((l) => l.id === activeLayerId)
-      const next = layers.slice()
-      next.splice(idx + 1, 0, layer)
-      this.setState({ layers: next, activeLayerId: layer.id })
+      this.setState({ layers: this.place([layer]), activeLayerId: layer.id, editMask: false })
     })
   }
 
@@ -1005,6 +1244,21 @@ export class PaintEngine {
       this.notify("Effects require a browser with WebGPU enabled.")
       return
     }
+    const made = this.makeFxLayers(items)
+    if (!made.length) return
+    this.structural(() => {
+      for (const layer of made) this.canvases.set(layer.id, makeCanvas(1, 1))
+      this.setState({
+        layers: this.place(made),
+        activeLayerId: made[made.length - 1].id,
+        editMask: false,
+      })
+    })
+  }
+
+  private makeFxLayers(
+    items: { type: string; params?: Record<string, number>; opacity?: number }[]
+  ): LayerMeta[] {
     const made: LayerMeta[] = []
     for (const item of items) {
       const def = getEffect(item.type)
@@ -1018,15 +1272,135 @@ export class PaintEngine {
       })
       this.layerCounter -= 1
     }
-    if (!made.length) return
+    return made
+  }
+
+  // ---- groups ----------------------------------------------------------------
+
+  /** Adds an empty group above the active layer. */
+  addGroup() {
+    this.structural(() => {
+      const group: LayerMeta = { ...this.makeLayer("Group"), group: true }
+      this.layerCounter -= 1
+      this.canvases.set(group.id, makeCanvas(1, 1))
+      this.setState({ layers: this.place([group]), activeLayerId: group.id, editMask: false })
+    })
+  }
+
+  /** Wraps a layer (or a group) in a new group. */
+  groupLayer(id: string) {
+    this.groupLayers([id])
+  }
+
+  /**
+   * Gathers layers (groups come with their contents) into a new group where
+   * the topmost of them was, and makes the group active.
+   */
+  groupLayers(ids: Iterable<string>) {
+    const group: LayerMeta = { ...this.makeLayer("Group"), group: true }
+    this.layerCounter -= 1
+    const next = groupBlocks(this.state.layers, ids, group)
+    if (!next) return
+    this.structural(() => {
+      this.canvases.set(group.id, makeCanvas(1, 1))
+      this.setState({ layers: next, activeLayerId: group.id, editMask: false })
+    })
+  }
+
+  /** Moves layers above, below or into a target layer (null: the bottom of the stack). */
+  moveLayersTo(ids: Iterable<string>, targetId: string | null, place: DropPlace) {
+    const next = moveBlocks(this.state.layers, ids, targetId, place)
+    if (!next) return
+    this.structural(() => this.setState({ layers: next }))
+  }
+
+  /** Dissolves a group, leaving its layers where they are. */
+  ungroup(id: string) {
+    const group = this.layerById(id)
+    if (!group?.group) return
     this.structural(() => {
       const { layers, activeLayerId } = this.state
-      for (const layer of made) this.canvases.set(layer.id, makeCanvas(1, 1))
-      const idx = layers.findIndex((l) => l.id === activeLayerId)
-      const next = layers.slice()
-      next.splice(idx + 1, 0, ...made)
-      this.setState({ layers: next, activeLayerId: made[made.length - 1].id })
+      const idx = layers.indexOf(group)
+      const next = layers
+        .filter((l) => l.id !== id)
+        .map((l) => {
+          if (l.parent !== id) return l
+          const rest = { ...l }
+          delete rest.parent
+          return group.parent ? { ...rest, parent: group.parent } : rest
+        })
+      if (next.length === 0) return
+      this.canvases.delete(id)
+      this.masks.delete(id)
+      this.setState({
+        layers: next,
+        activeLayerId: activeLayerId === id ? next[Math.max(0, idx - 1)].id : activeLayerId,
+        editMask: false,
+      })
     })
+  }
+
+  // ---- effect brush ----------------------------------------------------------
+
+  /** The masked group the effect brush would paint on: the active layer's, if any. */
+  effectGroup(): LayerMeta | null {
+    let l = this.activeLayer()
+    for (let n = 0; l && n < 32; n++) {
+      if (l.group && l.mask) return l
+      l = this.layerById(l.parent)
+    }
+    return null
+  }
+
+  /** Picks the effect the effect brush paints, and sets up a group for it. */
+  setFxChoice(choice: FxChoice) {
+    this.setState({ fxChoice: choice })
+    this.addEffectGroup(choice)
+  }
+
+  setFxHide(hide: boolean) {
+    this.setState({ fxHide: hide })
+  }
+
+  /**
+   * Adds a group holding the chosen effect's adjustment layers, hidden
+   * everywhere by its mask until the effect brush paints it in. It goes above
+   * the effect group being painted, or else above the active layer.
+   */
+  addEffectGroup(choice = this.state.fxChoice): boolean {
+    if (!this.fx) {
+      this.notify("Effects require a browser with WebGPU enabled.")
+      return false
+    }
+    const look = choice.kind === "look" ? LOOKS.find((l) => l.id === choice.id) : undefined
+    const made = this.makeFxLayers(look ? look.layers : [{ type: choice.id }])
+    if (!made.length) return false
+    this.structural(() => {
+      const group: LayerMeta = {
+        ...this.makeLayer(`${fxChoiceLabel(choice)} brush`),
+        group: true,
+        mask: true,
+        maskRev: nextRev(),
+        brushFx: `${choice.kind}:${choice.id}`,
+      }
+      this.layerCounter -= 1
+      for (const l of [...made, group]) this.canvases.set(l.id, makeCanvas(1, 1))
+      this.masks.set(group.id, this.blank())
+      const current = this.effectGroup()
+      let next: LayerMeta[]
+      if (current) {
+        // Beside the group being painted, not inside it.
+        if (current.parent) group.parent = current.parent
+        next = this.state.layers.slice()
+        next.splice(next.indexOf(current) + 1, 0, group)
+      } else {
+        next = this.place([group])
+      }
+      for (const l of made) l.parent = group.id
+      next.splice(next.indexOf(group), 0, ...made)
+      this.setState({ layers: next, activeLayerId: group.id, editMask: true })
+    })
+    return true
   }
 
   /**
@@ -1065,42 +1439,53 @@ export class PaintEngine {
   }
 
   duplicateLayer(id: string) {
-    const src = this.canvases.get(id)
-    const meta = this.state.layers.find((l) => l.id === id)
-    if (!src || !meta) return
+    const block = layerBlock(this.state.layers, id)
+    if (!block) return
     this.structural(() => {
-      const copy: LayerMeta = {
-        ...meta,
-        id: uid("layer"),
-        name: `${meta.name} copy`,
-        rev: nextRev(),
-      }
-      this.canvases.set(copy.id, cloneCanvas(src))
-      const mask = this.masks.get(id)
-      if (mask) {
-        this.masks.set(copy.id, cloneCanvas(mask))
-        copy.maskRev = nextRev()
-      }
-      const next = this.state.layers.slice()
-      next.splice(next.indexOf(meta) + 1, 0, copy)
-      this.setState({ layers: next, activeLayerId: copy.id })
+      const { layers } = this.state
+      const [s, e] = block
+      // A group is copied with everything inside it.
+      const ids = new Map<string, string>()
+      for (let i = s; i <= e; i++) ids.set(layers[i].id, uid("layer"))
+      const copies = layers.slice(s, e + 1).map((meta, i): LayerMeta => {
+        const copy: LayerMeta = { ...meta, id: ids.get(meta.id)!, rev: nextRev() }
+        if (s + i === e) copy.name = `${meta.name} copy`
+        else copy.parent = ids.get(meta.parent ?? "") ?? meta.parent
+        const src = this.canvases.get(meta.id)
+        if (src) this.canvases.set(copy.id, cloneCanvas(src))
+        const mask = this.masks.get(meta.id)
+        if (mask) {
+          this.masks.set(copy.id, cloneCanvas(mask))
+          copy.maskRev = nextRev()
+        }
+        return copy
+      })
+      const next = layers.slice()
+      next.splice(e + 1, 0, ...copies)
+      this.setState({ layers: next, activeLayerId: copies[copies.length - 1].id })
     })
   }
 
   deleteLayer(id: string) {
     const { layers } = this.state
-    if (layers.length <= 1) {
-      this.clearLayer(id)
+    const block = layerBlock(layers, id)
+    if (!block) return
+    const [s, e] = block
+    const next = layers.filter((_, i) => i < s || i > e)
+    if (next.every((l) => l.group)) {
+      // A painting always keeps a layer to paint on.
+      if (layers[e].group) this.notify("A painting needs at least one layer")
+      else this.clearLayer(id)
       return
     }
     this.structural(() => {
-      const idx = layers.findIndex((l) => l.id === id)
-      const next = layers.filter((l) => l.id !== id)
-      this.canvases.delete(id)
-      this.masks.delete(id)
+      for (let i = s; i <= e; i++) {
+        this.canvases.delete(layers[i].id)
+        this.masks.delete(layers[i].id)
+      }
       let active = this.state.activeLayerId
-      if (active === id) active = next[Math.max(0, idx - 1)].id
-      this.setState({ layers: next, activeLayerId: active })
+      if (!next.some((l) => l.id === active)) active = next[Math.max(0, s - 1)].id
+      this.setState({ layers: next, activeLayerId: active, editMask: false })
     })
   }
 
@@ -1113,6 +1498,14 @@ export class PaintEngine {
     }
     const upper = layers[idx]
     const lower = layers[idx - 1]
+    if (upper.group) {
+      this.notify("Groups can't be merged down")
+      return
+    }
+    if (lower.group || lower.parent !== upper.parent) {
+      this.notify("No layer directly below to merge into")
+      return
+    }
     if (lower.fx) {
       this.notify("Can't merge into an adjustment layer")
       return
@@ -1196,16 +1589,9 @@ export class PaintEngine {
   }
 
   moveLayer(id: string, dir: 1 | -1) {
-    const { layers } = this.state
-    const idx = layers.findIndex((l) => l.id === id)
-    const to = idx + dir
-    if (idx < 0 || to < 0 || to >= layers.length) return
-    this.structural(() => {
-      const next = layers.slice()
-      const [l] = next.splice(idx, 1)
-      next.splice(to, 0, l)
-      this.setState({ layers: next })
-    })
+    const next = moveBlock(this.state.layers, id, dir)
+    if (!next) return
+    this.structural(() => this.setState({ layers: next }))
   }
 
   setLayerProps(
@@ -1237,8 +1623,8 @@ export class PaintEngine {
     const src = map.get(id)
     if (!src) return
     const meta = this.state.layers.find((l) => l.id === id)
-    if (target === "pixels" && meta?.fx) {
-      this.notify("Adjustment layers have no pixels to edit")
+    if (target === "pixels" && meta && noPixels(meta)) {
+      this.notify(meta.group ? "Groups have no pixels to edit" : "Adjustment layers have no pixels to edit")
       return
     }
     if (target === "pixels" && meta && !this.pixelLayer(meta, "Rasterise this vector layer to edit its pixels")) {
@@ -1545,10 +1931,13 @@ export class PaintEngine {
     })
   }
 
+  /** The layer a clipped layer `index` hangs from: the first unclipped one beneath it in its group. */
   private baseOf(index: number): LayerMeta | null {
     const { layers } = this.state
+    const parent = layers[index].parent
     for (let j = index - 1; j >= 0; j--) {
-      if (!layers[j].clip) return layers[j]
+      if (layers[j].parent !== parent) return null
+      if (!layers[j].clip || layers[j].group) return layers[j]
     }
     return null
   }
@@ -1557,7 +1946,7 @@ export class PaintEngine {
   private clipBase(index: number): LayerMeta | null {
     if (!this.state.layers[index].clip) return null
     const base = this.baseOf(index)
-    return base && !base.fx ? base : null
+    return base && !noPixels(base) ? base : null
   }
 
   /** True while the GPU brush is painting on this canvas of this layer. */
@@ -1659,7 +2048,7 @@ export class PaintEngine {
     let { src, ox, oy } = s
     if (m.clip) {
       const base = this.baseOf(i)
-      if (base && !base.fx) {
+      if (base && !noPixels(base)) {
         if (!base.visible) return
         const B = ctxOf(this.scratchB)
         B.globalAlpha = 1
@@ -1682,20 +2071,28 @@ export class PaintEngine {
 
   /**
    * Draws every visible paint layer into ctx using whatever transform is set.
-   * Adjustment layers are skipped; `compose()` is the path that honours them.
+   * Adjustment layers and group masks are skipped; `compose()` is the path
+   * that honours them.
    */
   private drawLayers(ctx: CanvasRenderingContext2D) {
     const { layers } = this.state
     for (let i = 0; i < layers.length; i++) {
-      if (layers[i].visible && !layers[i].fx) this.drawLayer(ctx, i)
+      if (!noPixels(layers[i]) && this.shown(layers[i])) this.drawLayer(ctx, i)
     }
     ctx.globalAlpha = 1
     ctx.globalCompositeOperation = "source-over"
   }
 
-  /** True when a visible adjustment layer means the document must be flattened. */
+  /**
+   * True when the document must be flattened to be shown: a visible
+   * adjustment layer, or a group whose mask or opacity is in play.
+   */
   private fxActive(): boolean {
-    return !!this.fx && this.state.layers.some((l) => l.fx && l.visible)
+    return this.state.layers.some(
+      (l) =>
+        ((l.fx && !!this.fx) || (l.group && ((l.mask && !l.maskOff) || l.opacity < 1))) &&
+        this.shown(l)
+    )
   }
 
   /**
@@ -1753,6 +2150,8 @@ export class PaintEngine {
             l.blend,
             l.clip,
             l.fx,
+            l.group,
+            l.parent,
             l.mask,
             l.maskOff,
             l.maskRev,
@@ -1771,23 +2170,38 @@ export class PaintEngine {
       A.fillRect(0, 0, docW, docH)
     }
 
-    for (let i = 0; i < layers.length; i++) {
+    this.composeInto(this.comp, undefined, 0)
+    return this.comp
+  }
+
+  /** Draws the layers of one group (or the top level) over what `target` holds. */
+  private composeInto(target: HTMLCanvasElement, parent: string | undefined, depth: number) {
+    const { layers } = this.state
+    const kids: number[] = []
+    layers.forEach((l, i) => {
+      if (l.parent === parent) kids.push(i)
+    })
+    const A = ctxOf(target)
+    for (let k = 0; k < kids.length; k++) {
+      const i = kids[k]
       const m = layers[i]
       if (!m.visible) continue
+      if (m.group) {
+        this.composeGroup(target, m, depth)
+        continue
+      }
       if (m.fx) {
         // Clipped adjustments are handled with their base layer below.
-        if (!this.clipBase(i)) this.applyFx(this.comp, m)
+        if (!this.clipBase(i)) this.applyFx(target, m)
         continue
       }
       // The run of layers clipped to this one.
-      let end = i
+      let end = k
       if (!m.clip) {
-        while (end + 1 < layers.length && layers[end + 1].clip) end++
+        while (end + 1 < kids.length && layers[kids[end + 1]].clip && !layers[kids[end + 1]].group) end++
       }
-      const grouped = layers
-        .slice(i + 1, end + 1)
-        .some((l) => l.fx && l.visible)
-      if (!grouped) {
+      const run = kids.slice(k + 1, end + 1)
+      if (!run.some((j) => layers[j].fx && layers[j].visible)) {
         this.drawLayer(A, i)
         continue
       }
@@ -1799,7 +2213,7 @@ export class PaintEngine {
         G.globalAlpha = 1
         G.globalCompositeOperation = "copy"
         G.drawImage(s.src, s.ox, s.oy)
-        for (let j = i + 1; j <= end; j++) {
+        for (const j of run) {
           const f = layers[j]
           if (!f.visible) continue
           if (f.fx) this.applyFx(this.scratchG, f)
@@ -1809,11 +2223,53 @@ export class PaintEngine {
         A.globalCompositeOperation = m.blend
         A.drawImage(this.scratchG, 0, 0)
       }
-      i = end
+      k = end
     }
     A.globalAlpha = 1
     A.globalCompositeOperation = "source-over"
-    return this.comp
+  }
+
+  /**
+   * Draws a group over `target`. A group passes through, so its layers are
+   * drawn straight onto a copy of what is beneath; the copy then replaces the
+   * original only as far as the group's mask and opacity allow.
+   */
+  private composeGroup(target: HTMLCanvasElement, m: LayerMeta, depth: number) {
+    const masked = !!m.mask && !m.maskOff && this.masks.has(m.id)
+    if (!masked && m.opacity >= 1) {
+      this.composeInto(target, m.id, depth + 1)
+      return
+    }
+    const { docW, docH } = this.state
+    const group = this.scratch(`group${depth}`)
+    const G = ctxOf(group)
+    G.globalAlpha = 1
+    G.globalCompositeOperation = "copy"
+    G.drawImage(target, 0, 0)
+    G.globalCompositeOperation = "source-over"
+    this.composeInto(group, m.id, depth + 1)
+    // Only now fetch the mask: a live one may share a canvas with the layers.
+    const mask = this.maskOf(m)
+    const T = ctxOf(target)
+    G.globalAlpha = m.opacity
+    G.globalCompositeOperation = "destination-in"
+    T.globalAlpha = m.opacity
+    T.globalCompositeOperation = "destination-out"
+    if (mask) {
+      G.drawImage(mask.src, mask.ox, mask.oy)
+      T.drawImage(mask.src, mask.ox, mask.oy)
+    } else {
+      G.fillStyle = "#000"
+      G.fillRect(0, 0, docW, docH)
+      T.fillStyle = "#000"
+      T.fillRect(0, 0, docW, docH)
+    }
+    G.globalAlpha = 1
+    G.globalCompositeOperation = "source-over"
+    T.globalAlpha = 1
+    T.globalCompositeOperation = "lighter"
+    T.drawImage(group, 0, 0)
+    T.globalCompositeOperation = "source-over"
   }
 
   private getChecker(ctx: CanvasRenderingContext2D): CanvasPattern | null {
@@ -2124,16 +2580,23 @@ export class PaintEngine {
       (tool === "move" && this.activeLayer()?.vector)
     ) {
       if (e.button === 0) this.beginVector(tool, id, x, y, sx, sy, !wasTyping)
+    } else if (tool === "fx") {
+      this.simPressure = 0.75
+      if (e.button === 0) this.beginEffectPaint(id, x, y, this.pressure(e), this.sampleExtra(e))
     } else {
       const layer = this.activeLayer()
       if (!layer) return
-      if (!layer.visible) {
+      if (!this.shown(layer)) {
         this.notify("The active layer is hidden")
         return
       }
       const onMask = this.state.editMask && !!layer.mask
-      if (layer.fx && !(onMask || (tool === "move" && layer.mask))) {
-        this.notify("Select a paint layer — adjustment layers hold no pixels")
+      if (noPixels(layer) && !(onMask || (tool === "move" && layer.mask))) {
+        this.notify(
+          layer.group
+            ? "Select a paint layer — groups hold no pixels"
+            : "Select a paint layer — adjustment layers hold no pixels"
+        )
         return
       }
       if (!onMask && !this.pixelLayer(layer, "Rasterise this vector layer to paint on it")) return
@@ -2141,7 +2604,7 @@ export class PaintEngine {
         const sel = this.selection
         const src = this.canvases.get(layer.id)
         let float: { cut: HTMLCanvasElement; rest: HTMLCanvasElement } | undefined
-        if (sel && src && !layer.fx) {
+        if (sel && src && !noPixels(layer)) {
           const part = (op: GlobalCompositeOperation) => {
             const c = cloneCanvas(src)
             const cx = ctxOf(c)
@@ -2170,6 +2633,25 @@ export class PaintEngine {
     this.updateCursor()
   }
 
+  /**
+   * Starts an effect-brush stroke: it paints the mask of the effect group the
+   * active layer belongs to, making one from the chosen effect if there is none.
+   */
+  private beginEffectPaint(pointerId: number, x: number, y: number, p: number, extra: SampleExtra) {
+    let group = this.effectGroup()
+    if (!group) {
+      if (!this.addEffectGroup()) return
+      group = this.effectGroup()
+    }
+    if (!group) return
+    if (!this.shown(group)) {
+      this.notify("That effect group is hidden")
+      return
+    }
+    if (group.maskOff) this.setLayerProps(group.id, { maskOff: false }, false)
+    this.beginPaint("fx", group, pointerId, x, y, p, extra)
+  }
+
   private beginPaint(
     tool: PaintTool,
     layer: LayerMeta,
@@ -2184,6 +2666,8 @@ export class PaintEngine {
     // Smudging drags the paint already there with a dry version of the brush;
     // the tool's opacity acts as its strength.
     if (tool === "smudge") brush = dryBrush(brush)
+    // The effect brush only ever paints a mask, so pigment plays no part.
+    if (tool === "fx") brush = maskBrush(brush)
     const gpu = this.gpu
     if (!gpu) {
       this.notify("Painting requires WebGPU. Enable it and reload.")
@@ -2191,9 +2675,11 @@ export class PaintEngine {
     }
     // On a mask the brush reveals with light colours and hides with dark.
     const target: Target =
-      this.state.editMask && layer.mask ? "mask" : "pixels"
+      tool === "fx" || (this.state.editMask && layer.mask) ? "mask" : "pixels"
     const onMask = target === "mask"
-    const hide = onMask && (tool === "eraser" || this.colorIsDark())
+    const hide =
+      onMask &&
+      (tool === "eraser" || (tool === "fx" ? this.state.fxHide : this.colorIsDark()))
     if (tool === "brush" && !onMask) this.rememberColor()
     const rgb = onMask
       ? [255, 255, 255]
@@ -2545,7 +3031,7 @@ export class PaintEngine {
         }
         return
       }
-      if (!meta.fx) {
+      if (!noPixels(meta)) {
         this.canvases.set(layerId, shifted(src))
         this.bumpRev(layerId)
       }
@@ -2770,7 +3256,7 @@ export class PaintEngine {
     const c = makeCanvas(docW, docH)
     const ctx = c.getContext("2d", { willReadFrequently: true })!
     const layer = this.activeLayer()
-    if (sampleAll || !layer || layer.fx) {
+    if (sampleAll || !layer || noPixels(layer)) {
       if (showBackground) {
         ctx.fillStyle = background
         ctx.fillRect(0, 0, docW, docH)
@@ -2899,8 +3385,8 @@ export class PaintEngine {
   /** Selects wherever the active layer has paint. */
   selectLayerPixels() {
     const layer = this.activeLayer()
-    if (!layer || layer.fx) {
-      this.notify("Adjustment layers hold no pixels to select")
+    if (!layer || noPixels(layer)) {
+      this.notify("That layer holds no pixels to select")
       return
     }
     const c = this.full()
@@ -2938,8 +3424,8 @@ export class PaintEngine {
     const layer = this.activeLayer()
     if (!layer) return null
     if (this.state.editMask && layer.mask) return { layer, target: "mask" }
-    if (layer.fx) {
-      this.notify("Select a paint layer — adjustment layers hold no pixels")
+    if (noPixels(layer)) {
+      this.notify("Select a paint layer — that layer holds no pixels")
       return null
     }
     return { layer, target: "pixels" }
@@ -3006,8 +3492,8 @@ export class PaintEngine {
   /** Lifts the selected pixels onto a new layer, leaving or removing them. */
   selectionToLayer(cut: boolean) {
     const layer = this.activeLayer()
-    if (!layer || layer.fx) {
-      this.notify("Select a paint layer — adjustment layers hold no pixels")
+    if (!layer || noPixels(layer)) {
+      this.notify("Select a paint layer — that layer holds no pixels")
       return
     }
     const sel = this.selection
@@ -3022,7 +3508,7 @@ export class PaintEngine {
       p.globalCompositeOperation = "destination-in"
       p.drawImage(sel, 0, 0)
       p.globalCompositeOperation = "source-over"
-      let layers = this.state.layers
+      const layers = this.state.layers
       if (cut) {
         const rest = cloneCanvas(this.canvases.get(layer.id)!)
         const r = ctxOf(rest)
@@ -3030,15 +3516,14 @@ export class PaintEngine {
         r.drawImage(sel, 0, 0)
         r.globalCompositeOperation = "source-over"
         this.canvases.set(layer.id, rest)
-        layers = layers.map((l) =>
-          l.id === layer.id ? { ...l, rev: nextRev() } : l
-        )
+        this.setState({
+          layers: layers.map((l) => (l.id === layer.id ? { ...l, rev: nextRev() } : l)),
+        })
       }
       this.layerCounter -= 1
       const made = this.makeLayer(`${layer.name} ${cut ? "cut" : "copy"}`)
       this.canvases.set(made.id, piece)
-      const next = layers.slice()
-      next.splice(next.findIndex((l) => l.id === layer.id) + 1, 0, made)
+      const next = this.place([made], layer.id)
       this.setState({ layers: next, activeLayerId: made.id, editMask: false })
     })
   }
@@ -3106,8 +3591,12 @@ export class PaintEngine {
   applyMask(id: string) {
     const meta = this.state.layers.find((l) => l.id === id)
     if (!meta || !this.masks.has(id)) return
-    if (meta.fx) {
-      this.notify("An adjustment layer's mask can't be applied — merge it down instead")
+    if (noPixels(meta)) {
+      this.notify(
+        meta.group
+          ? "A group's mask can't be applied to pixels"
+          : "An adjustment layer's mask can't be applied — merge it down instead"
+      )
       return
     }
     this.structural(() => {
@@ -3440,14 +3929,13 @@ export class PaintEngine {
     const before = this.snap()
     let layerId = layer?.id ?? ""
     if (!layer?.vector || !layer.visible) {
-      const { layers, activeLayerId, docW, docH } = this.state
+      const { docW, docH } = this.state
       const made: LayerMeta = {
         ...this.makeLayer(`Vector ${this.layerCounter + 1}`),
         vector: [],
       }
       this.canvases.set(made.id, makeCanvas(docW, docH))
-      const next = layers.slice()
-      next.splice(layers.findIndex((l) => l.id === activeLayerId) + 1, 0, made)
+      const next = this.place([made])
       this.setState({ layers: next, activeLayerId: made.id, editMask: false })
       layerId = made.id
     }
@@ -3731,7 +4219,7 @@ export class PaintEngine {
     setImageAsset(assetId, image)
     this.imageBlobs.set(assetId, file)
     this.structural(() => {
-      const { layers, activeLayerId, docW, docH } = this.state
+      const { docW, docH } = this.state
       const k = Math.min(1, docW / image.width, docH / image.height)
       const w = Math.round(image.width * k)
       const h = Math.round(image.height * k)
@@ -3751,8 +4239,7 @@ export class PaintEngine {
       }
       const layer: LayerMeta = { ...this.makeLayer(name || "Image"), vector: [obj] }
       this.canvases.set(layer.id, makeCanvas(docW, docH))
-      const next = layers.slice()
-      next.splice(layers.findIndex((l) => l.id === activeLayerId) + 1, 0, layer)
+      const next = this.place([layer])
       this.setState({ layers: next, activeLayerId: layer.id, editMask: false, vecSel: obj.id })
     })
     // The move tool shows the new image's handles straight away.
@@ -3834,7 +4321,7 @@ export class PaintEngine {
       this.requestRender()
     }
     if (!layer) return fail("")
-    if (layer.fx) return fail("Adjustment layers hold no pixels to distort")
+    if (noPixels(layer)) return fail("That layer holds no pixels to distort")
     if (layer.vector && !layer.vector.some(isImageObject)) {
       return fail("Rasterise this vector layer to distort it")
     }
@@ -4158,8 +4645,8 @@ export class PaintEngine {
       this.fillSelection()
       return
     }
-    if (layer.fx) {
-      this.notify("Select a paint layer — adjustment layers hold no pixels")
+    if (noPixels(layer)) {
+      this.notify("Select a paint layer — that layer holds no pixels")
       return
     }
     if (!this.pixelLayer(layer, "Rasterise this vector layer to fill it")) return
@@ -4301,7 +4788,7 @@ export class PaintEngine {
     if (!id) return
     const blobs: Record<string, Blob> = {}
     for (const meta of s.layers) {
-      if (meta.fx || meta.vector) continue
+      if (noPixels(meta) || meta.vector) continue
       const cached = this.blobCache.get(meta.id)
       if (cached && cached.rev === meta.rev) {
         blobs[meta.id] = cached.blob

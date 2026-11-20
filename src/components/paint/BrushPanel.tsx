@@ -7,8 +7,10 @@ import {
   allBrushes,
   BRUSH_CATEGORIES,
   getBrush,
+  maskBrush,
   subscribeBrushes,
   type BrushCategory,
+  type BrushPreset,
 } from "@/paint/brushes"
 import { engine, isPaintTool } from "@/paint/engine"
 import { BrushPreview } from "./BrushPreview"
@@ -17,6 +19,7 @@ const TOOL_LABEL = {
   brush: "Brush",
   eraser: "Eraser",
   smudge: "Smudge",
+  fx: "Effect brush",
 } as const
 
 type Filter = BrushCategory | "All" | "Mine"
@@ -44,6 +47,8 @@ export function BrushPanel({ onOpenStudio }: { onOpenStudio: () => void }) {
       ),
     [brushes, category]
   )
+  // The effect brush paints a mask, so previews show the mark without pigment.
+  const look = (b: BrushPreset) => (tool === "fx" ? maskBrush(b) : b)
   const filters: Filter[] = ["All", ...(hasCustom ? ["Mine" as const] : []), ...BRUSH_CATEGORIES]
 
   return (
@@ -77,7 +82,7 @@ export function BrushPanel({ onOpenStudio }: { onOpenStudio: () => void }) {
           onClick={onOpenStudio}
           className="group mb-2 block w-full overflow-hidden rounded-xl bg-black/20 text-left outline-none hover:bg-black/35 focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <BrushPreview brush={active} />
+          <BrushPreview brush={look(active)} />
           <span className="flex items-center gap-1.5 px-3 pb-2 text-xs font-semibold">
             <SlidersHorizontal className="size-3.5" />
             Brush studio
@@ -108,7 +113,7 @@ export function BrushPanel({ onOpenStudio }: { onOpenStudio: () => void }) {
                 "border-primary bg-primary/25 hover:bg-primary/25"
             )}
           >
-            <BrushPreview brush={b} />
+            <BrushPreview brush={look(b)} />
             <span className="absolute top-1 left-2 text-[10.5px] font-medium text-foreground/80">
               {b.name}
               {b.custom && <span className="ml-1.5 text-primary-foreground/60">· mine</span>}
