@@ -79,6 +79,10 @@ export function useShortcuts(togglePanels: () => void) {
 
       if (e.code === "Space") {
         e.preventDefault()
+        // A toolbar button keeping focus after a click would otherwise be
+        // pressed by the space bar as well as panning.
+        const focused = document.activeElement
+        if (focused instanceof HTMLElement && focused !== document.body) focused.blur()
         engine.setSpace(true)
         return
       }

@@ -255,7 +255,7 @@ function Values({ color, hex }: { color: HSV; hex: string }) {
     engine.setColor(rgbToHsv(Math.round(nr), Math.round(ng), Math.round(nb), color.h))
   const ramp = (from: string, to: string) => `linear-gradient(to right, ${from}, ${to})`
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]">
+    <div className="min-h-0 flex-1 overflow-y-auto">
       <Section title="Hex">
         <HexField hex={hex} className="w-24" />
       </Section>
@@ -425,7 +425,7 @@ export function ColorPanel() {
       )}
 
       {tab === "palettes" && (
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-0.5 [scrollbar-width:thin]">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-0.5">
           {s.recentColors.length > 0 && (
             <div>
               <h3 className="mb-1.5 text-xs font-semibold text-foreground">Recent</h3>

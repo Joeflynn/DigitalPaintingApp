@@ -1,7 +1,12 @@
 import {
   ArrowClockwiseIcon,
+  ArrowDownIcon,
+  ArrowUpIcon,
+  CopyIcon,
+  TrashIcon,
   ArrowCounterClockwiseIcon,
   ArrowsInIcon,
+  ArrowsOutIcon,
   CaretDownIcon,
   CheckIcon,
   CompassToolIcon,
@@ -37,7 +42,15 @@ import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { hsvToHex } from "@/paint/color"
 import { importImages } from "@/paint/palettes"
-import { engine, fxChoiceLabel, isPaintTool, isSelectTool, type SelectMode, type SelectModify } from "@/paint/engine"
+import {
+  engine,
+  fxChoiceLabel,
+  isPaintTool,
+  isSelectTool,
+  selectedObject,
+  type SelectMode,
+  type SelectModify,
+} from "@/paint/engine"
 
 const PRESETS = [
   { label: "Landscape", w: 2000, h: 1400 },
@@ -50,7 +63,8 @@ const PRESETS = [
 const SHORTCUTS: [string, string][] = [
   ["B / E / S", "Brush, eraser, smudge"],
   ["K", "Effect brush"],
-  ["G / I", "Fill, eyedropper"],
+  ["G / I", "Fill & gradient, eyedropper"],
+  ["Shift + drag gradient", "Snap the angle to 45°"],
   ["V / D", "Move, warp"],
   ["U / T", "Shape, text"],
   ["A / L / P", "Rectangle, lasso, polygon select"],
@@ -65,13 +79,14 @@ const SHORTCUTS: [string, string][] = [
   ["1 – 0", "Brush opacity"],
   ["Alt + click", "Pick colour"],
   ["X", "Swap colours"],
-  ["Space + drag", "Pan"],
-  ["Scroll", "Zoom"],
+  ["Space or middle-drag", "Pan"],
+  ["Two fingers", "Pan (touch or touchpad)"],
+  ["Scroll wheel / pinch", "Zoom"],
   ["R + drag / Shift + scroll", "Rotate canvas"],
   ["F", "Fit canvas"],
   ["M", "Symmetry on / off"],
   ["Ctrl Z / Ctrl Shift Z", "Undo / redo"],
-  ["Tab", "Hide panels"],
+  ["Tab", "Hide or show the interface"],
   ["Two-finger tap", "Undo (touch)"],
 ]
 
@@ -310,7 +325,7 @@ function ViewMenu({
         </MenuItem>
       ))}
       <MenuItem keys="Tab" onClick={run(onTogglePanels)}>
-        {panelsOpen ? "Hide all panels" : "Show panels"}
+        {panelsOpen ? "Hide interface" : "Show interface"}
       </MenuItem>
 
       <div className={heading}>Controls</div>
@@ -650,6 +665,43 @@ function ContextBar({ togglePanel, panelOpen }: { togglePanel: (id: PanelId) => 
         {tool === "fx" && <EffectBrushContext />}
       </>
     )
+  } else if (s.tool === "fill" && s.fillMode !== "bucket") {
+    const end = (value: "previous" | "transparent", content: ReactNode, title: string) => (
+      <button
+        type="button"
+        title={title}
+        aria-pressed={s.gradientEnd === value}
+        onClick={() => engine.setFillOptions({ gradientEnd: value })}
+        className={cn(
+          "flex h-6 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+          s.gradientEnd === value && "bg-white/15 text-foreground"
+        )}
+      >
+        {content}
+      </button>
+    )
+    body = (
+      <>
+        <span className={tightCaption}>{s.fillMode === "radial" ? "Radial" : "Linear"}</span>
+        <span
+          title="Starts with the current colour"
+          className="size-5 shrink-0 rounded-full border border-white/25"
+          style={{ background: hsvToHex(s.color) }}
+        />
+        <span className="text-[11px] text-muted-foreground">to</span>
+        <div className="flex shrink-0 items-center rounded-[10px] bg-black/30 p-0.5" role="group" aria-label="Gradient end">
+          {end(
+            "previous",
+            <>
+              <span className="size-3 rounded-full border border-white/25" style={{ background: hsvToHex(s.prevColor) }} />
+              Previous
+            </>,
+            "Fade to the previous colour (X swaps them)"
+          )}
+          {end("transparent", "Transparent", "Fade out to nothing")}
+        </div>
+      </>
+    )
   } else if (s.tool === "fill") {
     body = (
       <>
@@ -663,6 +715,24 @@ function ContextBar({ togglePanel, panelOpen }: { togglePanel: (id: PanelId) => 
           onChange={(v) => engine.setFillTolerance(v)}
         />
         <span className="w-6 text-[10px] text-muted-foreground tabular-nums">{s.fillTolerance}</span>
+      </>
+    )
+  } else if (selectedObject(s)) {
+    body = (
+      <>
+        <span className={captionClass}>Object</span>
+        <IconButton label="Bring forward" className="size-7" onClick={() => engine.orderObject(1)}>
+          <ArrowUpIcon />
+        </IconButton>
+        <IconButton label="Send backward" className="size-7" onClick={() => engine.orderObject(-1)}>
+          <ArrowDownIcon />
+        </IconButton>
+        <IconButton label="Duplicate object" className="size-7" onClick={() => engine.duplicateObject()}>
+          <CopyIcon />
+        </IconButton>
+        <IconButton label="Delete object (Backspace)" className="size-7" onClick={() => engine.deleteObject()}>
+          <TrashIcon />
+        </IconButton>
       </>
     )
   } else if (s.tool === "shape" || s.tool === "text" || kind === "object") {
@@ -948,14 +1018,35 @@ export function TopBar({
   )
 }
 
-/** Fit and zoom, in the bottom-left corner. */
-export function ZoomBar() {
+/**
+ * The bottom-left corner: the show/hide interface toggle, then zoom. With the
+ * interface hidden only the toggle remains.
+ */
+export function ZoomBar({
+  uiVisible,
+  showZoom,
+  onToggleUi,
+}: {
+  uiVisible: boolean
+  showZoom: boolean
+  onToggleUi: () => void
+}) {
   const s = useEngine()
+  const toggle = (
+    <IconButton
+      label={uiVisible ? "Hide interface (Tab)" : "Show interface (Tab)"}
+      aria-pressed={!uiVisible}
+      onClick={onToggleUi}
+    >
+      {uiVisible ? <ArrowsInIcon /> : <ArrowsOutIcon />}
+    </IconButton>
+  )
+  if (!uiVisible || !showZoom) {
+    return <div className={cn(panelClass, "absolute bottom-3 left-3 z-30 flex h-12 items-center px-1")}>{toggle}</div>
+  }
   return (
     <div className={cn(panelClass, "absolute bottom-3 left-3 z-30 flex h-12 items-center gap-0.5 px-1")}>
-      <IconButton label="Fit canvas (F)" onClick={() => engine.fit()}>
-        <ArrowsInIcon />
-      </IconButton>
+      {toggle}
       <Divider />
       <IconButton label="Zoom out (−)" onClick={() => engine.zoomBy(0.8)}>
         <MinusIcon />

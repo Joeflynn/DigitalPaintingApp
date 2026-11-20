@@ -1,5 +1,7 @@
 import {
   ArrowCounterClockwiseIcon,
+  ArrowLeftIcon,
+  CaretLeftIcon,
   ArrowElbowDownRightIcon,
   CaretDownIcon,
   CaretRightIcon,
@@ -23,16 +25,23 @@ import {
 } from "@phosphor-icons/react"
 import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import type { ReactNode } from "react"
 
 import checkerImg from "@/assets/layer-checker.png"
 import filtersIcon from "@/assets/icons/filters.svg"
 
-import { IconButton, MaskIcon, Slider, panelClass, useDismiss } from "@/components/paint/controls"
+import {
+  IconButton,
+  MaskIcon,
+  Slider,
+  panelClass,
+  useDismiss,
+} from "@/components/paint/controls"
 import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
+import { effectPreview, sampleUrl } from "@/paint/effect-preview"
 import {
   defaultFx,
-  EFFECT_GROUPS,
   EFFECTS,
   formatParam,
   getEffect,
@@ -108,7 +117,10 @@ function MaskThumb({ layer, aspect }: { layer: LayerMeta; aspect: number }) {
       ref={ref}
       width={width}
       height={height}
-      className={cn("block size-full bg-black object-contain", layer.maskOff && "opacity-30")}
+      className={cn(
+        "block size-full bg-black object-contain",
+        layer.maskOff && "opacity-30"
+      )}
     />
   )
 }
@@ -117,33 +129,56 @@ function MaskThumb({ layer, aspect }: { layer: LayerMeta; aspect: number }) {
 const thumbButtonClass =
   "absolute top-[3px] z-10 grid size-[22px] place-items-center rounded-[6px] text-muted-foreground outline-none transition-[background-color,opacity] [&_svg]:size-[18px] focus-visible:ring-2 focus-visible:ring-ring hover:text-foreground"
 /** Their resting look; they fill in while the tile is hovered or active. */
-const thumbButtonRest = "opacity-60 group-hover/tile:bg-muted group-hover/tile:opacity-100 group-hover/tile:shadow-sm"
+const thumbButtonRest =
+  "opacity-60 group-hover/tile:bg-muted group-hover/tile:opacity-100 group-hover/tile:shadow-sm"
 const thumbButtonOn = "bg-muted opacity-100 shadow-sm"
 
 function MaskControls({ layer }: { layer: LayerMeta }) {
   const id = layer.id
   return (
-    <div className="flex items-center gap-0.5 border-t border-white/8 px-2 pt-1.5 pb-2">
-      <span className="mr-auto text-[10px] text-muted-foreground uppercase">Mask</span>
-      <IconButton label="Invert mask" className="size-7" onClick={() => engine.invertMask(id)}>
+    <div className="flex items-center justify-end gap-0.5 border-t border-white/8 px-2 pt-1.5 pb-2">
+      <span className="mr-auto text-[10px] text-muted-foreground uppercase @max-[229px]:sr-only">
+        Mask
+      </span>
+      <IconButton
+        label="Invert mask"
+        className="size-7"
+        onClick={() => engine.invertMask(id)}
+      >
         <SwapIcon />
       </IconButton>
       <IconButton
-        label={layer.maskOff ? "Enable mask" : "Disable mask (Shift-click its thumbnail)"}
+        label={
+          layer.maskOff
+            ? "Enable mask"
+            : "Disable mask (Shift-click its thumbnail)"
+        }
         className="size-7"
         onClick={() => engine.setLayerProps(id, { maskOff: !layer.maskOff })}
       >
         {layer.maskOff ? <EyeSlashIcon className="opacity-50" /> : <EyeIcon />}
       </IconButton>
-      <IconButton label="Load mask as selection" className="size-7" onClick={() => engine.selectFromMask(id)}>
+      <IconButton
+        label="Load mask as selection"
+        className="size-7"
+        onClick={() => engine.selectFromMask(id)}
+      >
         <SelectionIcon />
       </IconButton>
       {!layer.fx && (
-        <IconButton label="Apply mask to the layer's pixels" className="size-7" onClick={() => engine.applyMask(id)}>
+        <IconButton
+          label="Apply mask to the layer's pixels"
+          className="size-7"
+          onClick={() => engine.applyMask(id)}
+        >
           <CheckIcon />
         </IconButton>
       )}
-      <IconButton label="Delete mask" className="size-7" onClick={() => engine.removeMask(id)}>
+      <IconButton
+        label="Delete mask"
+        className="size-7"
+        onClick={() => engine.removeMask(id)}
+      >
         <TrashIcon />
       </IconButton>
     </div>
@@ -175,7 +210,10 @@ function FxThumb() {
 function GroupThumb({ layer }: { layer: LayerMeta }) {
   return (
     <div className="absolute inset-0 grid place-items-center bg-[#26261f] text-white/80">
-      <FolderIcon className="size-6" weight={layer.brushFx ? "fill" : "regular"} />
+      <FolderIcon
+        className="size-6"
+        weight={layer.brushFx ? "fill" : "regular"}
+      />
     </div>
   )
 }
@@ -184,7 +222,9 @@ function GroupThumb({ layer }: { layer: LayerMeta }) {
 function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
   const fx = layer.fx!
   const matches = (params: Record<string, number>) =>
-    def.params.every((p) => Math.abs((fx.params[p.key] ?? p.value) - params[p.key]) < 1e-6)
+    def.params.every(
+      (p) => Math.abs((fx.params[p.key] ?? p.value) - params[p.key]) < 1e-6
+    )
   return (
     <div className="flex flex-col gap-2 px-2 pt-0.5 pb-2">
       {def.presets && (
@@ -222,7 +262,9 @@ function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
         const v = fx.params[p.key] ?? p.value
         return (
           <div key={p.key} className="flex flex-wrap items-center gap-x-2">
-            <span className="w-16 truncate text-[10px] text-muted-foreground uppercase @max-[189px]:basis-full">{p.label}</span>
+            <span className="w-16 truncate text-[10px] text-muted-foreground uppercase @max-[189px]:basis-full">
+              {p.label}
+            </span>
             <Slider
               label={p.label}
               className="flex-1"
@@ -276,54 +318,147 @@ function FxControls({ layer, def }: { layer: LayerMeta; def: EffectDef }) {
   )
 }
 
-export function AddEffectMenu({
-  onPick,
-  onLook,
+/** An effect or look applied to a sample scene, rendered on the GPU once and cached. */
+function EffectThumb({ kind, id }: { kind: "fx" | "look"; id: string }) {
+  const [src, setSrc] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    void effectPreview(kind, id).then((url) => {
+      if (live) setSrc(url)
+    })
+    return () => {
+      live = false
+    }
+  }, [kind, id])
+  return (
+    <span className="relative h-7 w-9 shrink-0 overflow-hidden rounded-md border border-white/10 bg-[linear-gradient(142deg,rgb(237,227,204)_0%,rgb(140,168,199)_50%)]">
+      <img
+        alt=""
+        draggable={false}
+        src={src ?? sampleUrl()}
+        className={cn(
+          "absolute inset-0 size-full object-cover",
+          !src && "opacity-40"
+        )}
+      />
+    </span>
+  )
+}
+
+function EffectRow({
+  name,
+  hint,
+  thumb,
+  onAdd,
 }: {
-  onPick: (id: string) => void
-  onLook: (id: string) => void
+  name: string
+  hint: string
+  thumb: ReactNode
+  onAdd: () => void
 }) {
   return (
-    <div className="flex max-h-[min(60vh,26rem)] flex-col gap-2 overflow-y-auto [scrollbar-width:thin]">
-      <div>
-        <div className="px-1.5 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-          Looks
-        </div>
-        <div className="grid grid-cols-2 gap-1">
-          {LOOKS.map((look) => (
-            <button
-              key={look.id}
-              type="button"
-              title={`${look.hint} (${look.layers.length} layers)`}
-              onClick={() => onLook(look.id)}
-              className="truncate rounded-lg border border-white/10 bg-[linear-gradient(135deg,oklch(0.42_0.09_250/0.55),oklch(0.42_0.11_340/0.55))] px-1.5 py-1.5 text-left text-xs text-foreground outline-none hover:border-white/40 focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {look.label}
-            </button>
-          ))}
-        </div>
+    <button
+      type="button"
+      title={hint}
+      aria-label={`Add ${name}`}
+      onClick={onAdd}
+      className="group/row flex w-full items-center gap-1.5 rounded-xl bg-black/30 p-1.5 text-left outline-none hover:bg-white/6 focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {thumb}
+      <span className="min-w-0 flex-1 truncate text-[10px] leading-[14px] text-muted-foreground group-hover/row:text-foreground">
+        {name}
+      </span>
+      <span className="grid size-7 shrink-0 place-items-center rounded-xl text-muted-foreground group-hover/row:text-foreground">
+        <PlusIcon className="size-[18px]" />
+      </span>
+    </button>
+  )
+}
+
+/** Effect groups in the order the browser lists them, with their display names. */
+const SECTIONS: { id: string; label: string }[] = [
+  { id: "looks", label: "Looks" },
+  { id: "Glitch", label: "Glitch" },
+  { id: "Stylize", label: "Stylize" },
+  { id: "Filters", label: "Filters" },
+  { id: "Adjustments", label: "Adjustments" },
+  { id: "Effects", label: "Fx" },
+]
+
+/**
+ * The layers panel's alternate view for adding effects: collapsible
+ * sections of effects and looks, each shown on a preview thumbnail.
+ */
+function EffectsView({ onBack }: { onBack: () => void }) {
+  const [open, setOpen] = useState<Set<string>>(() => new Set(["Glitch"]))
+  const toggle = (id: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  const done = (run: () => void) => () => {
+    run()
+    onBack()
+  }
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-1 px-3 py-1.5">
+        <IconButton label="Back to layers" className="size-7" onClick={onBack}>
+          <ArrowLeftIcon />
+        </IconButton>
+        <h2 className="truncate text-sm leading-5 text-muted-foreground">
+          Layer effects
+        </h2>
       </div>
-      {EFFECT_GROUPS.map((group) => (
-        <div key={group}>
-          <div className="px-1.5 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-            {group}
-          </div>
-          <div className="grid grid-cols-2 gap-0.5">
-            {EFFECTS.filter((e) => e.group === group).map((e) => (
+      <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-x-hidden overflow-y-auto bg-black/30 px-2 pb-2">
+        {SECTIONS.map(({ id, label }) => {
+          const expanded = open.has(id)
+          const items =
+            id === "looks"
+              ? LOOKS.map((look) => (
+                  <EffectRow
+                    key={look.id}
+                    name={look.label}
+                    hint={`${look.hint} (${look.layers.length} layers)`}
+                    thumb={<EffectThumb kind="look" id={look.id} />}
+                    onAdd={done(() => engine.addAdjustments(look.layers))}
+                  />
+                ))
+              : EFFECTS.filter((e) => e.group === id).map((e) => (
+                  <EffectRow
+                    key={e.id}
+                    name={e.label}
+                    hint={e.hint}
+                    thumb={<EffectThumb kind="fx" id={e.id} />}
+                    onAdd={done(() => engine.addAdjustment(e.id))}
+                  />
+                ))
+          if (!items.length) return null
+          return (
+            <section key={id} className="contents">
               <button
-                key={e.id}
                 type="button"
-                title={e.hint}
-                onClick={() => onPick(e.id)}
-                className="truncate rounded-lg px-1.5 py-1.5 text-left text-xs text-foreground outline-none hover:bg-white/8 focus-visible:ring-2 focus-visible:ring-ring"
+                aria-expanded={expanded}
+                onClick={() => toggle(id)}
+                className="flex h-8 w-full shrink-0 items-center justify-between rounded-2xl px-2.5 text-sm leading-5 font-medium text-foreground outline-none hover:bg-white/6 focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {e.label}
+                {label}
+                {expanded ? (
+                  <CaretLeftIcon className="size-4" />
+                ) : (
+                  <CaretDownIcon className="size-4" />
+                )}
               </button>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
+              {expanded && (
+                <div className="flex flex-col gap-1 px-1">{items}</div>
+              )}
+            </section>
+          )
+        })}
+      </div>
+    </>
   )
 }
 
@@ -373,18 +508,26 @@ function LayerMenu({
     >
       {layer.vector && (
         <>
-          {item("Convert to raster layer", () => engine.rasterizeLayer(layer.id))}
+          {item("Convert to raster layer", () =>
+            engine.rasterizeLayer(layer.id)
+          )}
           <div className="mx-2 my-1 h-px bg-white/10" />
         </>
       )}
       {item("Rename", onRename)}
       {item("Duplicate", () => engine.duplicateLayer(layer.id))}
-      {!layer.fx && !layer.group && item("Merge down", () => engine.mergeDown(layer.id))}
+      {!layer.fx &&
+        !layer.group &&
+        item("Merge down", () => engine.mergeDown(layer.id))}
       {selection.length > 1
-        ? item(`Group ${selection.length} layers`, () => engine.groupLayers(selection))
+        ? item(`Group ${selection.length} layers`, () =>
+            engine.groupLayers(selection)
+          )
         : item("Group", () => engine.groupLayer(layer.id))}
       {layer.group && item("Ungroup", () => engine.ungroup(layer.id))}
-      {item(layer.visible ? "Hide" : "Show", () => engine.setLayerProps(layer.id, { visible: !layer.visible }))}
+      {item(layer.visible ? "Hide" : "Show", () =>
+        engine.setLayerProps(layer.id, { visible: !layer.visible })
+      )}
       <div className="mx-2 my-1 h-px bg-white/10" />
       {item("Delete", () => engine.deleteLayer(layer.id), true)}
     </div>,
@@ -429,7 +572,10 @@ function LayerRow({
       <div
         aria-hidden
         className="absolute inset-0 opacity-44"
-        style={{ backgroundImage: `url(${checkerImg})`, backgroundSize: "40px 40px" }}
+        style={{
+          backgroundImage: `url(${checkerImg})`,
+          backgroundSize: "40px 40px",
+        }}
       />
       <LayerThumb layer={layer} aspect={aspect} />
     </>
@@ -485,10 +631,20 @@ function LayerRow({
           if (e.pointerType === "mouse") return
           const { clientX: x, clientY: y } = e
           cancelPress()
-          press.current = { x, y, timer: window.setTimeout(() => setMenu({ x, y }), 550) }
+          press.current = {
+            x,
+            y,
+            timer: window.setTimeout(() => setMenu({ x, y }), 550),
+          }
         }}
         onPointerMove={(e) => {
-          if (Math.hypot(e.clientX - press.current.x, e.clientY - press.current.y) > 8) cancelPress()
+          if (
+            Math.hypot(
+              e.clientX - press.current.x,
+              e.clientY - press.current.y
+            ) > 8
+          )
+            cancelPress()
         }}
         onPointerUp={cancelPress}
         onPointerCancel={cancelPress}
@@ -515,8 +671,20 @@ function LayerRow({
             // With a mask, the thumbnail picks painting the layer itself.
             <button
               type="button"
-              aria-label={layer.group ? "Group" : layer.fx ? "Adjustment" : "Paint on the layer"}
-              title={layer.group ? "Group" : layer.fx ? "Adjustment" : "Paint on the layer"}
+              aria-label={
+                layer.group
+                  ? "Group"
+                  : layer.fx
+                    ? "Adjustment"
+                    : "Paint on the layer"
+              }
+              title={
+                layer.group
+                  ? "Group"
+                  : layer.fx
+                    ? "Adjustment"
+                    : "Paint on the layer"
+              }
               aria-pressed={active && !onMask}
               onClick={(e) => {
                 e.stopPropagation()
@@ -538,7 +706,11 @@ function LayerRow({
               const r = e.currentTarget.getBoundingClientRect()
               setMenu({ x: r.left, y: r.bottom + 4 })
             }}
-            className={cn(thumbButtonClass, "left-[3px]", active || menu ? thumbButtonOn : thumbButtonRest)}
+            className={cn(
+              thumbButtonClass,
+              "left-[3px]",
+              active || menu ? thumbButtonOn : thumbButtonRest
+            )}
           >
             <DotsThreeIcon weight="bold" />
           </button>
@@ -550,7 +722,11 @@ function LayerRow({
               e.stopPropagation()
               engine.setLayerProps(layer.id, { visible: !layer.visible })
             }}
-            className={cn(thumbButtonClass, "right-[3px]", active || !layer.visible ? thumbButtonOn : thumbButtonRest)}
+            className={cn(
+              thumbButtonClass,
+              "right-[3px]",
+              active || !layer.visible ? thumbButtonOn : thumbButtonRest
+            )}
           >
             {layer.visible ? <EyeIcon /> : <EyeSlashIcon />}
           </button>
@@ -559,15 +735,25 @@ function LayerRow({
               {layer.group && (
                 <button
                   type="button"
-                  aria-label={layer.collapsed ? "Expand group" : "Collapse group"}
+                  aria-label={
+                    layer.collapsed ? "Expand group" : "Collapse group"
+                  }
                   aria-expanded={!layer.collapsed}
                   onClick={(e) => {
                     e.stopPropagation()
-                    engine.setLayerProps(layer.id, { collapsed: !layer.collapsed }, false)
+                    engine.setLayerProps(
+                      layer.id,
+                      { collapsed: !layer.collapsed },
+                      false
+                    )
                   }}
                   className="grid size-[22px] place-items-center rounded-[6px] bg-muted text-muted-foreground shadow-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  {layer.collapsed ? <CaretRightIcon className="size-3.5" /> : <CaretDownIcon className="size-3.5" />}
+                  {layer.collapsed ? (
+                    <CaretRightIcon className="size-3.5" />
+                  ) : (
+                    <CaretDownIcon className="size-3.5" />
+                  )}
                 </button>
               )}
               {layer.clip && !layer.group && (
@@ -616,7 +802,8 @@ function LayerRow({
                 onClick={(e) => e.stopPropagation()}
                 onBlur={(e) => {
                   const name = e.target.value.trim()
-                  if (name && name !== layer.name) engine.setLayerProps(layer.id, { name })
+                  if (name && name !== layer.name)
+                    engine.setLayerProps(layer.id, { name })
                   setEditing(false)
                 }}
                 onKeyDown={(e) => {
@@ -641,7 +828,13 @@ function LayerRow({
               hasBlend && !onMask && "@min-[250px]:hidden"
             )}
           >
-            {layer.vector && <ShapesIcon className="size-3 shrink-0" weight="fill" aria-label="Vector layer" />}
+            {layer.vector && (
+              <ShapesIcon
+                className="size-3 shrink-0"
+                weight="fill"
+                aria-label="Vector layer"
+              />
+            )}
             <span className="truncate">
               {onMask
                 ? "Editing mask"
@@ -653,7 +846,13 @@ function LayerRow({
                     ? (fxDef?.label ?? "Adjustment")
                     : (blend?.label ?? "Normal")}
             </span>
-            {layer.alphaLock && <LockSimpleIcon className="size-3 shrink-0" weight="fill" aria-label="Alpha locked" />}
+            {layer.alphaLock && (
+              <LockSimpleIcon
+                className="size-3 shrink-0"
+                weight="fill"
+                aria-label="Alpha locked"
+              />
+            )}
           </div>
           {hasBlend && !onMask && (
             <div className="relative hidden h-7 @min-[250px]:block">
@@ -662,7 +861,11 @@ function LayerRow({
                 value={layer.blend}
                 onClick={(e) => e.stopPropagation()}
                 onPointerDown={(e) => e.stopPropagation()}
-                onChange={(e) => engine.setLayerProps(layer.id, { blend: e.target.value as BlendMode })}
+                onChange={(e) =>
+                  engine.setLayerProps(layer.id, {
+                    blend: e.target.value as BlendMode,
+                  })
+                }
                 className="size-full appearance-none rounded-lg border border-white/10 bg-black/30 pr-6 pl-2 text-[11px] leading-4 text-foreground outline-none hover:border-white/30 focus:border-ring"
               >
                 {BLEND_MODES.map((b) => (
@@ -681,24 +884,43 @@ function LayerRow({
           >
             <Slider
               bar
-              label={layer.fx ? "Effect strength" : layer.group ? "Group opacity" : "Layer opacity"}
+              label={
+                layer.fx
+                  ? "Effect strength"
+                  : layer.group
+                    ? "Group opacity"
+                    : "Layer opacity"
+              }
               min={0}
               max={1}
               value={layer.opacity}
-              onChange={(v) => engine.setLayerProps(layer.id, { opacity: v }, false)}
+              onChange={(v) =>
+                engine.setLayerProps(layer.id, { opacity: v }, false)
+              }
             />
           </div>
         </div>
       </div>
 
       {menu && (
-        <LayerMenu layer={layer} selection={selected ? selection : [layer.id]} at={menu} onClose={() => setMenu(null)} onRename={() => setEditing(true)} />
+        <LayerMenu
+          layer={layer}
+          selection={selected ? selection : [layer.id]}
+          at={menu}
+          onClose={() => setMenu(null)}
+          onRename={() => setEditing(true)}
+        />
       )}
 
       {active && fxDef && <FxControls layer={layer} def={fxDef} />}
 
       {active && layer.group && (
-        <div className={cn("flex items-center justify-end gap-2 px-2 pt-0.5 pb-2", layer.mask && "@min-[190px]:hidden")}>
+        <div
+          className={cn(
+            "flex items-center justify-end gap-2 px-2 pt-0.5 pb-2",
+            layer.mask && "@min-[190px]:hidden"
+          )}
+        >
           <Slider
             bar
             label="Group opacity"
@@ -706,7 +928,9 @@ function LayerRow({
             min={0}
             max={1}
             value={layer.opacity}
-            onChange={(v) => engine.setLayerProps(layer.id, { opacity: v }, false)}
+            onChange={(v) =>
+              engine.setLayerProps(layer.id, { opacity: v }, false)
+            }
           />
           <AddMaskButton layer={layer} />
         </div>
@@ -721,7 +945,9 @@ function LayerRow({
               min={0}
               max={1}
               value={layer.opacity}
-              onChange={(v) => engine.setLayerProps(layer.id, { opacity: v }, false)}
+              onChange={(v) =>
+                engine.setLayerProps(layer.id, { opacity: v }, false)
+              }
             />
           </div>
           <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -729,7 +955,9 @@ function LayerRow({
               aria-label="Blend mode"
               value={layer.blend}
               onChange={(e) =>
-                engine.setLayerProps(layer.id, { blend: e.target.value as BlendMode })
+                engine.setLayerProps(layer.id, {
+                  blend: e.target.value as BlendMode,
+                })
               }
               className="h-7 min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-1.5 text-[11px] text-foreground outline-none focus:border-ring @max-[249px]:basis-full @min-[250px]:hidden"
             >
@@ -753,7 +981,11 @@ function LayerRow({
                 label="Alpha lock — paint only on existing pixels"
                 className="size-7"
                 active={layer.alphaLock}
-                onClick={() => engine.setLayerProps(layer.id, { alphaLock: !layer.alphaLock })}
+                onClick={() =>
+                  engine.setLayerProps(layer.id, {
+                    alphaLock: !layer.alphaLock,
+                  })
+                }
               >
                 {layer.alphaLock ? <LockSimpleIcon /> : <LockSimpleOpenIcon />}
               </IconButton>
@@ -762,7 +994,9 @@ function LayerRow({
               label="Clipping mask — clip to the layer below"
               className="size-7"
               active={layer.clip}
-              onClick={() => engine.setLayerProps(layer.id, { clip: !layer.clip })}
+              onClick={() =>
+                engine.setLayerProps(layer.id, { clip: !layer.clip })
+              }
             >
               <ArrowElbowDownRightIcon />
             </IconButton>
@@ -787,8 +1021,7 @@ export function LayersPanel() {
   const s = useEngine()
   const id = s.activeLayerId
   const aspect = s.docW / s.docH
-  const [fxMenu, setFxMenu] = useState(false)
-  useDismiss(fxMenu, () => setFxMenu(false))
+  const [fxView, setFxView] = useState(false)
   // Layers folded away inside a collapsed group. Going down the stack from the
   // top, a group is always met before the layers inside it.
   const folded = new Set<string>()
@@ -810,12 +1043,17 @@ export function LayersPanel() {
   })()
   const selected = new Set(selection)
 
-  const select = (layerId: string, e: React.MouseEvent | React.KeyboardEvent) => {
+  const select = (
+    layerId: string,
+    e: React.MouseEvent | React.KeyboardEvent
+  ) => {
     if (e.shiftKey && id && !("key" in e)) {
       const a = rows.findIndex((l) => l.id === id)
       const b = rows.findIndex((l) => l.id === layerId)
       if (a >= 0 && b >= 0) {
-        setPicked(rows.slice(Math.min(a, b), Math.max(a, b) + 1).map((l) => l.id))
+        setPicked(
+          rows.slice(Math.min(a, b), Math.max(a, b) + 1).map((l) => l.id)
+        )
         return
       }
     }
@@ -850,9 +1088,19 @@ export function LayersPanel() {
   } | null>(null)
 
   const beginDrag = (layerId: string, e: React.PointerEvent) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest("input, select, [role=slider]")) return
-    if (e.pointerType === "touch" && !(e.target as HTMLElement).closest("[data-drag-handle]")) return
-    const ids = selected.has(layerId) ? outermostLayers(s.layers, selection) : [layerId]
+    if (
+      e.button !== 0 ||
+      (e.target as HTMLElement).closest("input, select, [role=slider]")
+    )
+      return
+    if (
+      e.pointerType === "touch" &&
+      !(e.target as HTMLElement).closest("[data-drag-handle]")
+    )
+      return
+    const ids = selected.has(layerId)
+      ? outermostLayers(s.layers, selection)
+      : [layerId]
     const start = { x: e.clientX, y: e.clientY }
     let started = false
     let target: { id: string | null; place: DropPlace } | null = null
@@ -861,10 +1109,13 @@ export function LayersPanel() {
       const list = listRef.current
       if (!list) return null
       const box = list.getBoundingClientRect()
-      if (x < box.left || x > box.right || y < box.top || y > box.bottom) return null
+      if (x < box.left || x > box.right || y < box.top || y > box.bottom)
+        return null
       if (y < box.top + 20) list.scrollTop -= 8
       else if (y > box.bottom - 20) list.scrollTop += 8
-      const row = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-layer-row]")
+      const row = document
+        .elementFromPoint(x, y)
+        ?.closest<HTMLElement>("[data-layer-row]")
       const layers = engine.getState().layers
       let next: { id: string | null; place: DropPlace }
       if (!row || !list.contains(row)) {
@@ -908,8 +1159,12 @@ export function LayersPanel() {
         c.preventDefault()
       }
       window.addEventListener("click", swallow, { capture: true, once: true })
-      window.setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0)
-      if (ev.type === "pointerup" && target) engine.moveLayersTo(ids, target.id, target.place)
+      window.setTimeout(
+        () => window.removeEventListener("click", swallow, { capture: true }),
+        0
+      )
+      if (ev.type === "pointerup" && target)
+        engine.moveLayersTo(ids, target.id, target.place)
     }
     window.addEventListener("pointermove", move)
     window.addEventListener("pointerup", end)
@@ -918,105 +1173,130 @@ export function LayersPanel() {
 
   return (
     <div className="@container relative flex min-h-0 flex-1 flex-col">
-      {fxMenu && (
+      {fxView ? (
+        <EffectsView onBack={() => setFxView(false)} />
+      ) : (
         <>
-          <div data-popover className={cn(panelClass, "absolute inset-x-0 bottom-full z-50 mb-2 p-2 @max-[249px]:w-60 @max-[249px]:group-data-[side=l]/panel:right-auto @max-[249px]:group-data-[side=r]/panel:left-auto group-data-[tight]/panel:top-10 group-data-[tight]/panel:bottom-auto group-data-[tight]/panel:mb-0")}>
-            <AddEffectMenu
-              onPick={(type) => {
-                engine.addAdjustment(type)
-                setFxMenu(false)
-              }}
-              onLook={(lookId) => {
-                const look = LOOKS.find((l) => l.id === lookId)
-                if (look) engine.addAdjustments(look.layers)
-                setFxMenu(false)
-              }}
-            />
+          <div className="flex items-center justify-between px-3.5 py-1.5 @max-[159px]:flex-wrap @max-[159px]:justify-center @max-[159px]:px-1">
+            <IconButton
+              label="New layer"
+              className="size-7"
+              onClick={() => engine.addLayer()}
+            >
+              <PlusIcon />
+            </IconButton>
+            <IconButton
+              label="Duplicate layer"
+              className="size-7"
+              onClick={() => engine.duplicateLayer(id)}
+            >
+              <CopyIcon />
+            </IconButton>
+            <IconButton
+              label="Delete layer"
+              className="size-7"
+              onClick={() => engine.deleteLayer(id)}
+            >
+              <TrashIcon />
+            </IconButton>
+            <IconButton
+              label="Add a filter — effect or adjustment layer"
+              className="size-7"
+              onClick={() => setFxView(true)}
+            >
+              <MaskIcon src={filtersIcon} />
+            </IconButton>
+            <IconButton
+              label={
+                selection.length > 1
+                  ? `Group ${selection.length} selected layers (Cmd/Ctrl+G)`
+                  : "New group"
+              }
+              className="size-7"
+              soft
+              active={selection.length > 1}
+              onClick={() =>
+                selection.length > 1 ? groupSelection() : engine.addGroup()
+              }
+            >
+              <FolderPlusIcon />
+            </IconButton>
+          </div>
+
+          <div
+            ref={listRef}
+            onKeyDown={(e) => {
+              if (e.key.toLowerCase() !== "g" || !(e.metaKey || e.ctrlKey))
+                return
+              e.preventDefault()
+              if (e.shiftKey) {
+                const active = s.layers.find((l) => l.id === id)
+                if (active?.group) engine.ungroup(id)
+              } else groupSelection()
+            }}
+            className={cn(
+              "min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-black/30 px-2 pt-2",
+              drag && "select-none"
+            )}
+          >
+            {rows.map((l) => (
+              <LayerRow
+                key={l.id}
+                layer={l}
+                active={l.id === id}
+                aspect={aspect}
+                editMask={s.editMask}
+                depth={layerDepth(s.layers, l)}
+                selected={selected.has(l.id)}
+                selection={selection}
+                onSelect={(e) => select(l.id, e)}
+                drop={drag?.target?.id === l.id ? drag.target.place : undefined}
+                dragged={!!drag && drag.ids.includes(l.id)}
+                onDragPointerDown={(e) => beginDrag(l.id, e)}
+              />
+            ))}
+            {drag?.target && drag.target.id === null && (
+              <div aria-hidden className="h-0.5 rounded-full bg-primary" />
+            )}
+            {/* Room below the last row to drop onto the bottom of the stack. */}
+            <div className="h-8" />
+          </div>
+
+          <div className="flex items-center gap-2 border-t border-white/10 p-2">
+            <label
+              className="relative size-6 shrink-0 overflow-hidden rounded-[6px] border border-white/10"
+              style={{ background: s.showBackground ? s.background : checker }}
+              title="Background colour"
+            >
+              <input
+                type="color"
+                aria-label="Background colour"
+                value={s.background}
+                onChange={(e) => engine.setBackground(e.target.value)}
+                className="absolute inset-0 size-full cursor-pointer opacity-0"
+              />
+            </label>
+            <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground @max-[189px]:invisible">
+              Background
+            </span>
+            <IconButton
+              label={
+                s.showBackground
+                  ? "Hide background (transparent)"
+                  : "Show background"
+              }
+              className="size-7"
+              onClick={() => engine.setShowBackground(!s.showBackground)}
+            >
+              {s.showBackground ? (
+                <EyeIcon />
+              ) : (
+                <EyeSlashIcon className="opacity-50" />
+              )}
+            </IconButton>
           </div>
         </>
       )}
-      <div className="flex items-center justify-between px-3.5 py-1.5 @max-[159px]:flex-wrap @max-[159px]:justify-center @max-[159px]:px-1">
-        <IconButton label="New layer" className="size-7" onClick={() => engine.addLayer()}>
-          <PlusIcon />
-        </IconButton>
-        <IconButton label="Duplicate layer" className="size-7" onClick={() => engine.duplicateLayer(id)}>
-          <CopyIcon />
-        </IconButton>
-        <IconButton label="Delete layer" className="size-7" onClick={() => engine.deleteLayer(id)}>
-          <TrashIcon />
-        </IconButton>
-        <IconButton label="Add a filter — effect or adjustment layer" data-popover className="size-7" soft active={fxMenu} onClick={() => setFxMenu(!fxMenu)}>
-          <MaskIcon src={filtersIcon} />
-        </IconButton>
-        <IconButton
-          label={selection.length > 1 ? `Group ${selection.length} selected layers (Cmd/Ctrl+G)` : "New group"}
-          className="size-7"
-          soft
-          active={selection.length > 1}
-          onClick={() => (selection.length > 1 ? groupSelection() : engine.addGroup())}
-        >
-          <FolderPlusIcon />
-        </IconButton>
-      </div>
-
-      <div
-        ref={listRef}
-        onKeyDown={(e) => {
-          if (e.key.toLowerCase() !== "g" || !(e.metaKey || e.ctrlKey)) return
-          e.preventDefault()
-          if (e.shiftKey) {
-            const active = s.layers.find((l) => l.id === id)
-            if (active?.group) engine.ungroup(id)
-          } else groupSelection()
-        }}
-        className={cn("min-h-0 flex-1 overflow-y-auto bg-black/30 px-2 pt-2 [scrollbar-width:thin]", drag && "select-none")}
-      >
-        {rows.map((l) => (
-          <LayerRow
-            key={l.id}
-            layer={l}
-            active={l.id === id}
-            aspect={aspect}
-            editMask={s.editMask}
-            depth={layerDepth(s.layers, l)}
-            selected={selected.has(l.id)}
-            selection={selection}
-            onSelect={(e) => select(l.id, e)}
-            drop={drag?.target?.id === l.id ? drag.target.place : undefined}
-            dragged={!!drag && drag.ids.includes(l.id)}
-            onDragPointerDown={(e) => beginDrag(l.id, e)}
-          />
-        ))}
-        {drag?.target && drag.target.id === null && (
-          <div aria-hidden className="h-0.5 rounded-full bg-primary" />
-        )}
-        {/* Room below the last row to drop onto the bottom of the stack. */}
-        <div className="h-8" />
-      </div>
-
-      <div className="flex items-center gap-2 border-t border-white/10 p-2">
-        <label
-          className="relative size-6 shrink-0 overflow-hidden rounded-[6px] border border-white/10"
-          style={{ background: s.showBackground ? s.background : checker }}
-          title="Background colour"
-        >
-          <input
-            type="color"
-            aria-label="Background colour"
-            value={s.background}
-            onChange={(e) => engine.setBackground(e.target.value)}
-            className="absolute inset-0 size-full cursor-pointer opacity-0"
-          />
-        </label>
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground @max-[189px]:invisible">Background</span>
-        <IconButton
-          label={s.showBackground ? "Hide background (transparent)" : "Show background"}
-          className="size-7"
-          onClick={() => engine.setShowBackground(!s.showBackground)}
-        >
-          {s.showBackground ? <EyeIcon /> : <EyeSlashIcon className="opacity-50" />}
-        </IconButton>
-      </div>
     </div>
   )
 }

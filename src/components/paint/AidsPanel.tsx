@@ -318,7 +318,7 @@ export function AidsPanel() {
           </button>
         ))}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3 [scrollbar-width:thin]">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3">
         {tab === "symmetry" && <SymmetryTab />}
         {tab === "guides" && <GuidesTab />}
         {tab === "reference" && <ReferenceTab />}

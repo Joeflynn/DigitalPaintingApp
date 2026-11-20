@@ -401,7 +401,7 @@ export function Gallery({ onClose }: { onClose: () => void }) {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-2 pb-10 [scrollbar-width:thin] sm:px-6">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-2 pb-10 sm:px-6">
         {projects && projects.length === 0 && (
           <div className="grid h-full place-items-center">
             <div className="flex flex-col items-center gap-3 text-center">

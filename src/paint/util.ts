@@ -83,3 +83,25 @@ export function uid(prefix = "id"): string {
   idCounter += 1
   return `${prefix}-${Date.now().toString(36)}-${idCounter.toString(36)}`
 }
+
+/** The smallest rectangle holding every non-transparent pixel, or null if there are none. */
+export function alphaBounds(c: HTMLCanvasElement): Rect | null {
+  const { width: w, height: h } = c
+  if (!w || !h) return null
+  const data = c.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, w, h).data
+  let x0 = w
+  let y0 = h
+  let x1 = -1
+  let y1 = -1
+  for (let y = 0; y < h; y++) {
+    let row = y * w * 4 + 3
+    for (let x = 0; x < w; x++, row += 4) {
+      if (data[row] === 0) continue
+      if (x < x0) x0 = x
+      if (x > x1) x1 = x
+      if (y < y0) y0 = y
+      y1 = y
+    }
+  }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }
+}

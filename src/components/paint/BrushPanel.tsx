@@ -213,7 +213,7 @@ export function BrushPanel({ onOpenStudio }: { onOpenStudio: () => void }) {
         ))}
       </nav>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-1 overflow-y-auto rounded-tl-2xl rounded-tr-[2px] rounded-br-[17px] rounded-bl-[2px] bg-white/6 p-2 [scrollbar-width:thin]">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-1 overflow-y-auto rounded-tl-2xl rounded-tr-[2px] rounded-br-[17px] rounded-bl-[2px] bg-white/6 p-2">
         {section === "effects" ? (
           <>
             <EffectHeading>Looks</EffectHeading>

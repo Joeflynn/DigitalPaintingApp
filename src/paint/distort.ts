@@ -415,3 +415,20 @@ export class DistortRenderer {
     return this.canvas
   }
 }
+
+/**
+ * Moves a session so it covers the rectangle at (x, y) instead of the
+ * document's corner. The renderer samples by each vertex's original
+ * position, so the mesh still reads the right pixels.
+ */
+export function offsetSession(s: DistortSession, x: number, y: number) {
+  const shift = (a: Float32Array) => {
+    for (let i = 0; i < a.length; i += 2) {
+      a[i] += x
+      a[i + 1] += y
+    }
+  }
+  shift(s.mesh.pos)
+  shift(s.mesh.orig)
+  if (s.ctrl) shift(s.ctrl)
+}

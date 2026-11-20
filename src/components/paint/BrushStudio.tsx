@@ -1215,12 +1215,12 @@ export function BrushStudio({ tool, onClose }: { tool: PaintTool; onClose: () =>
           </nav>
 
           <EditingContext.Provider value={{ brush, set, mask }}>
-            <div className="min-w-0 flex-1 [scrollbar-width:thin] overflow-y-auto px-5 py-4">
+            <div className="min-w-0 flex-1 overflow-y-auto px-5 py-4">
               <Section />
             </div>
           </EditingContext.Provider>
 
-          <aside className="flex w-[44%] max-w-[480px] shrink-0 flex-col gap-2.5 [scrollbar-width:thin] overflow-y-auto border-l border-white/8 p-3">
+          <aside className="flex w-[44%] max-w-[480px] shrink-0 flex-col gap-2.5 overflow-y-auto border-l border-white/8 p-3">
             <div className="overflow-hidden rounded-xl bg-black/30">
               <BrushPreview brush={shown} className="h-20 w-full object-contain" />
             </div>

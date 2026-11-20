@@ -69,8 +69,11 @@ export function App() {
     <div className="relative h-svh w-screen overflow-hidden bg-[radial-gradient(ellipse_at_center,oklch(0.24_0.008_107),oklch(0.15_0.006_107))] text-foreground select-none">
       <CanvasView />
       <AidsOverlay />
-      <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} onOpenGallery={openGallery} />
-      {!hidden.viewControls && <ZoomBar />}
+      {panelsOpen && (
+        <TopBar panelsOpen={panelsOpen} onTogglePanels={togglePanels} onShowPanels={showPanels} onOpenGallery={openGallery} />
+      )}
+      {/* Hiding the interface leaves only its toggle, in the bottom-left corner. */}
+      <ZoomBar uiVisible={panelsOpen} showZoom={!hidden.viewControls} onToggleUi={togglePanels} />
 
       {panelsOpen && (
         <>

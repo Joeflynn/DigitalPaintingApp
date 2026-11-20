@@ -1,9 +1,6 @@
 import {
-  ArrowDownIcon,
-  ArrowUpIcon,
   ArrowUpRightIcon,
   CircleIcon,
-  CopyIcon,
   HexagonIcon,
   LineSegmentIcon,
   ProhibitIcon,
@@ -14,7 +11,6 @@ import {
   TextAlignRightIcon,
   TextItalicIcon,
   TextUnderlineIcon,
-  TrashIcon,
 } from "@phosphor-icons/react"
 import { useState, type ReactNode } from "react"
 
@@ -330,32 +326,7 @@ export function VectorPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-0.5 px-2 pt-1.5 pb-1">
-        <h2 className="mr-auto pl-1 text-xs font-semibold tracking-wide text-foreground uppercase">
-          {isText ? "Text" : "Shape"}
-          <span className="ml-2 font-normal tracking-normal text-muted-foreground normal-case">
-            {obj ? "selected" : "next drawn"}
-          </span>
-        </h2>
-        {obj && (
-          <>
-            <IconButton label="Bring forward" className="size-7" onClick={() => engine.orderObject(1)}>
-              <ArrowUpIcon />
-            </IconButton>
-            <IconButton label="Send backward" className="size-7" onClick={() => engine.orderObject(-1)}>
-              <ArrowDownIcon />
-            </IconButton>
-            <IconButton label="Duplicate object" className="size-7" onClick={() => engine.duplicateObject()}>
-              <CopyIcon />
-            </IconButton>
-            <IconButton label="Delete object (Backspace)" className="size-7" onClick={() => engine.deleteObject()}>
-              <TrashIcon />
-            </IconButton>
-          </>
-        )}
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3 [scrollbar-width:thin]">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pt-1.5 pb-3">
         {shape && (
           <div className="flex gap-0.5 rounded-xl bg-black/25 p-0.5" role="group" aria-label="Shape">
             {SHAPE_KINDS.map((k) => (

@@ -12,6 +12,7 @@ import {
   liquifyDab,
   makeSession,
   nearestControl,
+  offsetSession,
   updateMesh,
   type DistortMode,
   type DistortSession,
@@ -69,6 +70,7 @@ import {
 } from "./vector"
 import {
   clamp,
+  alphaBounds,
   cloneCanvas,
   cropCanvas,
   ctxOf,
@@ -346,6 +348,16 @@ export function fxChoiceLabel(c: FxChoice): string {
   return (c.kind === "look" ? LOOKS.find((l) => l.id === c.id)?.label : getEffect(c.id)?.label) ?? "Effect"
 }
 
+/** A layer split at the selection for distorting just the selected part. */
+interface DistortSelection {
+  cut: HTMLCanvasElement
+  rest: HTMLCanvasElement
+  maskCut: HTMLCanvasElement | null
+  maskRest: HTMLCanvasElement | null
+  /** Liquify: the selection that limits where the result shows. */
+  clip: HTMLCanvasElement | null
+}
+
 /** Which of a layer's two canvases an edit goes to. */
 type Target = "pixels" | "mask"
 
@@ -366,6 +378,7 @@ export interface SelectOptions {
 }
 
 export type PaintTool = "brush" | "eraser" | "smudge" | "fx"
+export type FillMode = "bucket" | "linear" | "radial"
 export type ToolId =
   | PaintTool
   | SelectTool
@@ -431,6 +444,10 @@ export interface EngineState extends SelectOptions {
   prevColor: HSV
   recentColors: string[]
   fillTolerance: number
+  /** The fill tool floods an area, or drags out a gradient. */
+  fillMode: FillMode
+  /** Where a gradient ends up: the previous colour, or transparent. */
+  gradientEnd: "previous" | "transparent"
   canUndo: boolean
   canRedo: boolean
   zoom: number
@@ -510,6 +527,16 @@ type Action =
   | { kind: "pan"; pointerId: number; lx: number; ly: number }
   | { kind: "rotate"; pointerId: number; last: number }
   | { kind: "pick"; pointerId: number }
+  | {
+      kind: "gradient"
+      pointerId: number
+      layerId: string
+      target: Target
+      x0: number
+      y0: number
+      x1: number
+      y1: number
+    }
   | {
       kind: "move"
       pointerId: number
@@ -615,6 +642,8 @@ export class PaintEngine {
     prevColor: { h: 12, s: 0.72, v: 0.86 },
     recentColors: [],
     fillTolerance: 40,
+    fillMode: "bucket",
+    gradientEnd: "previous",
     canUndo: false,
     canRedo: false,
     zoom: 1,
@@ -719,6 +748,13 @@ export class PaintEngine {
         outMask: HTMLCanvasElement | null
         /** The layer has been handed to the renderer. */
         uploaded: boolean
+        /**
+         * With a selection, only it is distorted. Warp and perspective lift
+         * the selected pixels (`cut`) and transform them over the rest;
+         * liquify pushes the whole layer but keeps only what lands inside
+         * the selection (`clip`).
+         */
+        sel: DistortSelection | null
       })
     | null = null
   private distortGL: DistortRenderer | null = null
@@ -1809,6 +1845,11 @@ export class PaintEngine {
     this.setState({ fillTolerance: clamp(Math.round(v), 0, 255) })
   }
 
+  setFillOptions(patch: Partial<Pick<EngineState, "fillMode" | "gradientEnd">>) {
+    this.setState(patch)
+    this.updateCursor()
+  }
+
   // ---- view ----------------------------------------------------------------
 
   attach(canvas: HTMLCanvasElement, cursorEl: HTMLElement | null): () => void {
@@ -1821,6 +1862,8 @@ export class PaintEngine {
     canvas.addEventListener("pointercancel", this.onCancel, opts)
     canvas.addEventListener("pointerleave", this.onLeave)
     canvas.addEventListener("wheel", this.onWheel, opts)
+    canvas.addEventListener("mousedown", this.onMouseDown)
+    canvas.addEventListener("auxclick", this.onMouseDown)
     canvas.addEventListener("contextmenu", this.onContext)
     this.requestRender()
     return () => {
@@ -1830,6 +1873,8 @@ export class PaintEngine {
       canvas.removeEventListener("pointercancel", this.onCancel)
       canvas.removeEventListener("pointerleave", this.onLeave)
       canvas.removeEventListener("wheel", this.onWheel)
+      canvas.removeEventListener("mousedown", this.onMouseDown)
+      canvas.removeEventListener("auxclick", this.onMouseDown)
       canvas.removeEventListener("contextmenu", this.onContext)
       if (this.display === canvas) this.display = null
     }
@@ -2009,6 +2054,10 @@ export class PaintEngine {
     if (d?.outMask && d.layerId === m.id && this.state.distortDirty) {
       return { src: d.outMask, ox: 0, oy: 0 }
     }
+    const g = this.action
+    if (g?.kind === "gradient" && g.layerId === m.id && g.target === "mask") {
+      return { src: this.gradientOver(src, g, false, this.scratch("liveMask")), ox: 0, oy: 0 }
+    }
     const a = this.action
     if (a?.kind === "move" && a.layerId === m.id && !a.float) {
       return { src, ox: a.dx, oy: a.dy }
@@ -2027,6 +2076,8 @@ export class PaintEngine {
     const d = this.distort
     if (d?.out && d.layerId === m.id && this.state.distortDirty) {
       src = d.out
+    } else if (a?.kind === "gradient" && a.layerId === m.id && a.target === "pixels") {
+      src = this.gradientOver(base, a, m.alphaLock, this.scratch("live"))
     } else if (this.isLive(m, "pixels")) {
       src = this.liveCanvas(base)
     } else if (a?.kind === "move" && a.layerId === m.id) {
@@ -2372,6 +2423,7 @@ export class PaintEngine {
     this.drawOverlay(ctx, canvas)
     this.drawVecOverlay(ctx)
     this.drawDistortOverlay(ctx)
+    this.drawGradientOverlay(ctx)
     this.placeTextEditor()
 
     if (this.settling && --this.settling.frames <= 0) this.finishSettle()
@@ -2523,16 +2575,45 @@ export class PaintEngine {
     this.updateCursor()
   }
 
+  /** When the last wheel event looked like a touchpad, so one gesture stays one kind. */
+  private touchpadUntil = 0
+
+  /**
+   * Mouse wheel zooms; a touchpad's two-finger scroll pans and its pinch
+   * (which browsers report as a ctrl-wheel) zooms. Shift-wheel rotates.
+   */
   private onWheel = (e: WheelEvent) => {
     e.preventDefault()
     const [sx, sy] = this.local(e)
+    if (e.ctrlKey || e.metaKey) {
+      const delta = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY
+      this.zoomAt(sx, sy, Math.exp(-delta * 0.01))
+      return
+    }
+    // Touchpads scroll in fine pixel steps and often sideways; wheels click
+    // in large, whole, vertical-only steps (or in lines).
+    const now = performance.now()
+    const fine =
+      e.deltaMode === 0 &&
+      (e.deltaX !== 0 || !Number.isInteger(e.deltaY) || Math.abs(e.deltaY) < 16)
+    if (fine) this.touchpadUntil = now + 400
+    if (now < this.touchpadUntil && !e.shiftKey) {
+      this.view.tx -= e.deltaX
+      this.view.ty -= e.deltaY
+      this.viewChanged()
+      return
+    }
     if (e.shiftKey) {
-      this.rotateBy((e.deltaY > 0 ? 1 : -1) * (Math.PI / 36), sx, sy)
+      this.rotateBy(((e.deltaY || e.deltaX) > 0 ? 1 : -1) * (Math.PI / 36), sx, sy)
       return
     }
     const delta = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY
-    const k = e.ctrlKey ? 0.01 : 0.0018
-    this.zoomAt(sx, sy, Math.exp(-delta * k))
+    this.zoomAt(sx, sy, Math.exp(-delta * 0.0018))
+  }
+
+  /** Stops the browser's middle-click autoscroll so the middle button can pan. */
+  private onMouseDown = (e: MouseEvent) => {
+    if (e.button === 1) e.preventDefault()
   }
 
   private onDown = (e: PointerEvent) => {
@@ -2590,7 +2671,8 @@ export class PaintEngine {
       this.action = { kind: "pick", pointerId: id }
       this.pick(x, y)
     } else if (tool === "fill") {
-      this.fillAt(x, y)
+      if (this.state.fillMode === "bucket") this.fillAt(x, y)
+      else this.beginGradient(id, x, y)
     } else if (tool === "distort") {
       if (e.button === 0) this.beginDistortDrag(id, x, y)
     } else if (
@@ -2779,6 +2861,20 @@ export class PaintEngine {
     e.preventDefault()
 
     switch (a.kind) {
+      case "gradient": {
+        let [x, y] = this.screenToDoc(sx, sy)
+        if (e.shiftKey) {
+          // Shift snaps the direction to 45° steps.
+          const ang = Math.round(Math.atan2(y - a.y0, x - a.x0) / (Math.PI / 4)) * (Math.PI / 4)
+          const len = Math.hypot(x - a.x0, y - a.y0)
+          x = a.x0 + Math.cos(ang) * len
+          y = a.y0 + Math.sin(ang) * len
+        }
+        a.x1 = x
+        a.y1 = y
+        this.requestRender()
+        break
+      }
       case "pan":
         this.view.tx += sx - a.lx
         this.view.ty += sy - a.ly
@@ -2916,6 +3012,9 @@ export class PaintEngine {
       }
       case "move":
         if (a.dx !== 0 || a.dy !== 0) this.commitMove(a)
+        break
+      case "gradient":
+        this.commitGradient(a)
         break
       case "pick":
         // The colour panel's eyedropper picks once, then hands back the tool.
@@ -3076,6 +3175,9 @@ export class PaintEngine {
     this.selection = c
     if (c) this.lastSelection = c
     this.selRev++
+    // A new selection changes what is being distorted: keep what was done
+    // and start over on the new area.
+    if (this.state.tool === "distort" && this.distort) this.applyDistort()
     const canReselect = !!this.lastSelection
     if (
       this.state.hasSelection !== !!c ||
@@ -4363,12 +4465,46 @@ export class PaintEngine {
     if (!this.distortGL || !this.distortGL.fits(docW, docH)) {
       return fail("Distortion isn't available: WebGL2 can't handle this canvas")
     }
+    const box = this.selection ? alphaBounds(this.selection) : null
+    const src = this.canvases.get(layer.id)
+    const mask = this.masks.get(layer.id) ?? null
+    let session: DistortSession
+    let sel: DistortSelection | null = null
+    if (box && src && this.selection) {
+      const selection = this.selection
+      const part = (c: HTMLCanvasElement, op: GlobalCompositeOperation) => {
+        const out = cloneCanvas(c)
+        const cx = ctxOf(out)
+        cx.globalCompositeOperation = op
+        cx.drawImage(selection, 0, 0)
+        cx.globalCompositeOperation = "source-over"
+        return out
+      }
+      const liquify = distortMode === "liquify"
+      sel = {
+        cut: part(src, "destination-in"),
+        rest: part(src, "destination-out"),
+        maskCut: mask && part(mask, "destination-in"),
+        maskRest: mask && part(mask, "destination-out"),
+        clip: liquify ? selection : null,
+      }
+      if (liquify) {
+        session = makeSession(distortMode, docW, docH, warpGrid)
+      } else {
+        // The handles frame the selection rather than the whole canvas.
+        session = makeSession(distortMode, box.w, box.h, warpGrid)
+        offsetSession(session, box.x, box.y)
+      }
+    } else {
+      session = makeSession(distortMode, docW, docH, warpGrid)
+    }
     this.distort = {
-      ...makeSession(distortMode, docW, docH, warpGrid),
+      ...session,
       layerId: layer.id,
       out: null,
       outMask: null,
       uploaded: false,
+      sel,
     }
     this.setState({ distortActive: true, distortDirty: false })
     this.updateCursor()
@@ -4383,21 +4519,33 @@ export class PaintEngine {
     if (!d || !gl || !src) return
     const { docW, docH } = this.state
     const mask = this.masks.get(d.layerId)
+    const sel = d.sel
+    // Liquify reads the whole layer; warp and perspective only the lifted part.
+    const lifted = sel && !sel.clip
     if (!d.uploaded) {
-      gl.setSource(0, src)
-      if (mask) gl.setSource(1, mask)
+      gl.setSource(0, lifted ? sel.cut : src)
+      if (mask) gl.setSource(1, lifted ? (sel.maskCut ?? mask) : mask)
       d.uploaded = true
     }
-    const draw = (slot: 0 | 1, out: HTMLCanvasElement | null) => {
+    const draw = (slot: 0 | 1, out: HTMLCanvasElement | null, rest: HTMLCanvasElement | null) => {
       const c = out ?? makeCanvas(docW, docH)
       const ctx = ctxOf(c)
       ctx.globalCompositeOperation = "copy"
       ctx.drawImage(gl.render(slot, d.mesh, docW, docH), 0, 0)
+      if (sel?.clip) {
+        ctx.globalCompositeOperation = "destination-in"
+        ctx.drawImage(sel.clip, 0, 0)
+      }
+      if (rest) {
+        // Everything outside the selection stays where it was.
+        ctx.globalCompositeOperation = "destination-over"
+        ctx.drawImage(rest, 0, 0)
+      }
       ctx.globalCompositeOperation = "source-over"
       return c
     }
-    d.out = draw(0, d.out)
-    if (mask) d.outMask = draw(1, d.outMask)
+    d.out = draw(0, d.out, sel?.rest ?? null)
+    if (mask) d.outMask = draw(1, d.outMask, sel?.maskRest ?? null)
     if (!this.state.distortDirty) this.setState({ distortDirty: true })
     this.requestRender()
   }
@@ -4551,7 +4699,7 @@ export class PaintEngine {
       return true
     }
     const k = this.action?.kind
-    if (k === "marquee" || k === "lasso" || k === "selbrush" || k === "vec") {
+    if (k === "marquee" || k === "lasso" || k === "selbrush" || k === "vec" || k === "gradient") {
       this.cancelAction()
       return true
     }
@@ -4655,6 +4803,116 @@ export class PaintEngine {
     const px = ctx.getImageData(0, 0, 1, 1).data
     if (px[3] === 0) return
     this.setState({ color: rgbToHsv(px[0], px[1], px[2], this.state.color.h) })
+  }
+
+  // ---- gradient ------------------------------------------------------------
+
+  private beginGradient(pointerId: number, x: number, y: number) {
+    const layer = this.activeLayer()
+    if (!layer) return
+    if (!layer.visible) {
+      this.notify("The active layer is hidden")
+      return
+    }
+    const target: Target = this.state.editMask && layer.mask ? "mask" : "pixels"
+    if (target === "pixels") {
+      if (noPixels(layer)) {
+        this.notify("Select a paint layer — that layer holds no pixels")
+        return
+      }
+      if (!this.pixelLayer(layer, "Rasterise this vector layer to fill it")) return
+    }
+    this.action = { kind: "gradient", pointerId, layerId: layer.id, target, x0: x, y0: y, x1: x, y1: y }
+  }
+
+  /**
+   * `base` with the gradient laid over it, into `out`: from the current
+   * colour at the start point to the previous colour (or nothing) at the end.
+   * It stays inside the selection, and only on existing pixels with alpha lock.
+   */
+  private gradientOver(
+    base: HTMLCanvasElement,
+    a: Extract<Action, { kind: "gradient" }>,
+    alphaLock: boolean,
+    out: HTMLCanvasElement
+  ): HTMLCanvasElement {
+    const { docW: w, docH: h, color, prevColor, gradientEnd, fillMode } = this.state
+    const from = hsvToHex(color)
+    const to = gradientEnd === "transparent" ? null : hsvToHex(prevColor)
+    const rgb = hexToRgb(from) ?? [0, 0, 0]
+    const g = this.scratch("gradient")
+    const G = ctxOf(g)
+    G.globalAlpha = 1
+    G.globalCompositeOperation = "copy"
+    const len = Math.max(1, Math.hypot(a.x1 - a.x0, a.y1 - a.y0))
+    const grad =
+      fillMode === "radial"
+        ? G.createRadialGradient(a.x0, a.y0, 0, a.x0, a.y0, len)
+        : G.createLinearGradient(a.x0, a.y0, a.x1 === a.x0 && a.y1 === a.y0 ? a.x0 + 1 : a.x1, a.y1)
+    grad.addColorStop(0, from)
+    // Fading to transparent keeps the hue rather than going through black.
+    grad.addColorStop(1, to ?? `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0)`)
+    G.fillStyle = grad
+    G.fillRect(0, 0, w, h)
+    G.globalCompositeOperation = "source-over"
+
+    const O = ctxOf(out)
+    O.globalAlpha = 1
+    O.globalCompositeOperation = "copy"
+    O.drawImage(base, 0, 0)
+    O.globalCompositeOperation = alphaLock ? "source-atop" : "source-over"
+    O.drawImage(g, 0, 0)
+    O.globalCompositeOperation = "source-over"
+    const sel = this.selection
+    return sel ? maskedBlend(this.scratch("gradSel"), this.scratch("gradTmp"), base, out, sel) : out
+  }
+
+  private commitGradient(a: Extract<Action, { kind: "gradient" }>) {
+    // A click without a drag draws nothing.
+    if (Math.hypot(a.x1 - a.x0, a.y1 - a.y0) * this.view.scale < 4) {
+      this.requestRender()
+      return
+    }
+    const layer = this.layerById(a.layerId)
+    if (!layer) return
+    const lock = a.target === "pixels" && layer.alphaLock
+    this.rememberColor()
+    this.replaceCanvas(
+      a.layerId,
+      (src) => cloneCanvas(this.gradientOver(src, a, lock, makeCanvas(src.width, src.height))),
+      a.target
+    )
+  }
+
+  /** The line being dragged out, with its two ends. */
+  private drawGradientOverlay(ctx: CanvasRenderingContext2D) {
+    const a = this.action
+    if (a?.kind !== "gradient") return
+    const px = 1 / this.view.scale
+    ctx.save()
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(a.x0, a.y0)
+    ctx.lineTo(a.x1, a.y1)
+    ctx.lineWidth = 3 * px
+    ctx.strokeStyle = "rgba(0,0,0,0.35)"
+    ctx.stroke()
+    ctx.lineWidth = 1.5 * px
+    ctx.strokeStyle = "#ffffff"
+    ctx.stroke()
+    for (const [x, y] of [
+      [a.x0, a.y0],
+      [a.x1, a.y1],
+    ]) {
+      ctx.beginPath()
+      ctx.arc(x, y, 5 * px, 0, Math.PI * 2)
+      ctx.fillStyle = "#ffffff"
+      ctx.fill()
+      ctx.lineWidth = 1.5 * px
+      ctx.strokeStyle = "#2f8cff"
+      ctx.stroke()
+    }
+    ctx.restore()
   }
 
   private fillAt(fx: number, fy: number) {

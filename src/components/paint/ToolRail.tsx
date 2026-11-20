@@ -2,6 +2,7 @@ import {
   ArrowsOutCardinalIcon,
   DropIcon,
   EraserIcon,
+  GradientIcon,
   GridNineIcon,
   HandPointingIcon,
   PaintBrushIcon,
@@ -9,6 +10,7 @@ import {
   PerspectiveIcon,
   SelectionIcon,
   ShapesIcon,
+  TargetIcon,
   TextTIcon,
 } from "@phosphor-icons/react"
 import type { ReactNode } from "react"
@@ -20,6 +22,7 @@ import { useEngine } from "@/hooks/use-engine"
 import { cn } from "@/lib/utils"
 import { MAX_BRUSH_SIZE, MIN_BRUSH_SIZE } from "@/paint/brushes"
 import type { DistortMode } from "@/paint/distort"
+import type { FillMode } from "@/paint/engine"
 import {
   engine,
   isPaintTool,
@@ -40,7 +43,7 @@ const MAIN: { id: ToolId; label: string; icon: ReactNode; on: (t: ToolId) => boo
   { id: "brush", label: "Brush (B)", icon: <PaintBrushIcon />, on: (t) => t === "brush" || t === "fx" },
   { id: "smudge", label: "Smudge (S)", icon: <HandPointingIcon />, on: (t) => t === "smudge" },
   { id: "eraser", label: "Eraser (E)", icon: <EraserIcon />, on: (t) => t === "eraser" },
-  { id: "fill", label: "Fill (G)", icon: <PaintBucketIcon />, on: (t) => t === "fill" },
+  { id: "fill", label: "Fill & gradient (G)", icon: <PaintBucketIcon />, on: (t) => t === "fill" },
   { id: "shape", label: "Shape (U)", icon: <ShapesIcon />, on: (t) => t === "shape" },
   { id: "text", label: "Text (T)", icon: <TextTIcon />, on: (t) => t === "text" },
   { id: "select-rect", label: "Select (A, L, P, Q, W)", icon: <SelectionIcon />, on: isSelectTool },
@@ -82,10 +85,17 @@ const TRANSFORM: { mode: DistortMode | null; label: string; icon: ReactNode }[] 
   { mode: "liquify", label: "Liquify", icon: <DropIcon /> },
 ]
 
+const FILL: { mode: FillMode; label: string; icon: ReactNode }[] = [
+  { mode: "bucket", label: "Fill bucket — click an area", icon: <PaintBucketIcon /> },
+  { mode: "linear", label: "Linear gradient — drag from start to end (Shift snaps)", icon: <GradientIcon /> },
+  { mode: "radial", label: "Radial gradient — drag from the centre outwards", icon: <TargetIcon /> },
+]
+
 /** Whether the active tool has anything to show in the side rail. */
 export function hasRail(s: EngineState) {
   return (
     isPaintTool(s.tool) ||
+    s.tool === "fill" ||
     isSelectTool(s.tool) ||
     s.tool === "shape" ||
     s.tool === "move" ||
@@ -150,6 +160,24 @@ export function ToolRail({ className }: { className?: string }) {
         {SELECT_TOOL_INFO.map((t) => (
           <IconButton key={t.id} soft label={t.label} active={tool === t.id} onClick={() => engine.setTool(t.id)}>
             {t.icon}
+          </IconButton>
+        ))}
+      </div>
+    )
+  }
+
+  if (tool === "fill") {
+    return (
+      <div className={wrap}>
+        {FILL.map((f) => (
+          <IconButton
+            key={f.mode}
+            soft
+            label={f.label}
+            active={s.fillMode === f.mode}
+            onClick={() => engine.setFillOptions({ fillMode: f.mode })}
+          >
+            {f.icon}
           </IconButton>
         ))}
       </div>
